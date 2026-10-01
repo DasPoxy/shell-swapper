@@ -1018,6 +1018,358 @@ def add_key(lid, lua, yes):
         return dict(plan, added=True)
 
 
+# ---- a shell's actions: its IPC calls, for keys of its own ------------------
+#
+# Every IpcHandler in a suite's own plugins (and each of its panels, opened
+# with `omarchy-shell shell toggle <plugin>`) is something a key could do in
+# that shell. Each gets a category (dashboard, launcher, settings...) from its
+# name, arguments and comment, so a key set for one shell can be offered for
+# the similar call in the others: a template, reviewed before it's applied.
+
+TEMPLATES = os.path.join(CONF_DIR, "templates.json")
+QUERY_RE = re.compile(r"^(status|ping|version|is[A-Z].*|get[A-Z].*|list[A-Z].*|.*State|.*Status|.*List[A-Z]?.*)$")
+
+CATEGORIES = [
+    ("dashboard", "Dashboard / command centre", ["dashboard", "command centre", "command center", "control center",
+                                                 "controlcenter", "home"]),
+    ("launcher", "App launcher", ["launcher", "applauncher", "apps", "drawer", "app launcher"]),
+    ("settings", "Settings", ["settings"]),
+    ("wallpapers", "Wallpapers", ["wallpaper", "wallpapers", "background"]),
+    ("system", "System monitor", ["system", "monitor", "metrics", "stats"]),
+    ("tasks", "Tasks", ["tasks", "kanban", "todo", "todos"]),
+    ("media-play", "Play / pause", ["playpause", "play/pause", "play / pause", "play pause", "toggle play"]),
+    ("media-next", "Next track", ["next track", "media next", "nexttrack"]),
+    ("media-prev", "Previous track", ["previous track", "media previous", "prevtrack"]),
+    ("lyrics", "Lyrics / karaoke", ["lyrics", "karaoke"]),
+    ("notifications", "Notifications", ["notification", "notifications", "history"]),
+    ("dnd", "Do not disturb", ["dnd", "do not disturb"]),
+    ("power", "Power menu", ["power"]),
+    ("layer", "Above / behind windows", ["layer", "above", "behind"]),
+    ("plugins", "Plugins", ["plugins"]),
+]
+CATEGORY_NAMES = {c[0]: c[1] for c in CATEGORIES}
+
+
+def split_words(s):
+    """camelCase and kebab-case into words: toggleDashboard -> toggle dashboard."""
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(s))
+    return re.sub(r"[^a-zA-Z0-9/]+", " ", s).lower().strip()
+
+
+def categorize(text, media=False):
+    words = " " + split_words(text) + " "
+    best, score = "", 0
+    for cid, _, keys in CATEGORIES:
+        sc = sum(3 if " " + k + " " in words else 0 for k in keys)
+        if cid == "media-next" and media and " next " in words:
+            sc += 3
+        if cid == "media-prev" and media and " previous " in words:
+            sc += 3
+        if cid == "media-play" and media and (" toggle " in words or " play pause " in words):
+            sc += 2
+        if sc > score:
+            best, score = cid, sc
+    return best, score
+
+
+def arg_values(comment):
+    """Values a comment lists for an argument: 'on a tab: home, system, wallpapers'."""
+    tail = comment.rsplit(":", 1)[-1] if ":" in comment else comment
+    vals = [v.strip(" .()'\"") for v in re.split(r"[|,]", tail)]
+    vals = [v for v in vals if re.fullmatch(r"[a-z][a-z0-9-]{0,20}", v)]
+    return vals if len(vals) >= 2 else []
+
+
+def scan_ipc(path):
+    try:
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return []
+    out = []
+    for m in re.finditer(r"\bIpcHandler\s*\{", text):
+        i, depth = m.end(), 1
+        while i < len(text) and depth:
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            i += 1
+        block = text[m.end():i - 1]
+        tm = re.search(r"^\s*target:\s*(.+?)\s*$", block, re.M)
+        if not tm:
+            continue
+        t = tm.group(1).strip()
+        if t[:1] in "\"'":
+            target = t.strip("\"'")
+        else:
+            pm = re.search(r"property\s+string\s+" + re.escape(t.split(".")[-1]) + r"\s*:\s*[\"']([^\"']+)[\"']", text)
+            if not pm:
+                continue
+            target = pm.group(1)
+        blines = block.split("\n")
+        seen_fns = []
+        for k, l in enumerate(blines):
+            fm = re.match(r"\s*function\s+(\w+)\s*\(([^)]*)\)\s*(?::\s*(\w+))?", l)
+            if not fm:
+                continue
+            params = [p.strip() for p in fm.group(2).split(",") if p.strip()]
+            params = [p.split(":")[0].strip() for p in params]
+            com, j = [], k - 1
+            while j >= 0 and blines[j].strip().startswith("//"):
+                com.insert(0, blines[j].strip()[2:].strip())
+                j -= 1
+            comment = " ".join(com)
+            vals = arg_values(comment)
+            # a function with no comment of its own shares the values of one
+            # above it taking the same arguments (tab(name) / toggleTab(name))
+            if not vals and params:
+                vals = next((f["values"] for f in reversed(seen_fns) if f["params"] == params and f["values"]), [])
+            a = {"target": target, "function": fm.group(1), "params": params, "returns": fm.group(3) or "",
+                 "comment": comment, "values": vals}
+            seen_fns.append(a)
+            out.append(a)
+    return out
+
+
+def suite_plugins(sid, all_suites):
+    """The suite's own plugin folders: those its id prefixes own (the bar's
+    for Omarchy: its first-party plugins)."""
+    out = {}
+    r = rules(sid, all_suites)
+    for base in PLUGIN_DIRS:
+        for mf in glob.glob(os.path.join(base, "*", "manifest.json")):
+            m = read_json(mf, None)
+            if not isinstance(m, dict):
+                continue
+            pid = str(m.get("id") or "")
+            if not pid or pid in out:
+                continue
+            mine = any(pid.startswith(p) for p in r["owns"]) if r["owns"] else \
+                (sid == "omarchy.bar" and base == PLUGIN_DIRS[1])
+            if mine:
+                out[pid] = {"dir": os.path.realpath(os.path.dirname(mf)), "manifest": m}
+    return out
+
+
+def ipc_command(target, function, args):
+    return " ".join(["omarchy-shell", target, function] + [shlex.quote(a) for a in args])
+
+
+def actions_for(lid_or_suite, show_all=False):
+    """What keys could do in a loadout's shell: one choice per call (and per
+    listed argument value), with its category."""
+    all_suites, outs = suites(), loadouts()
+    if lid_or_suite.startswith("suite:"):
+        sid, lout = lid_or_suite[6:], None
+    else:
+        lout = outs.get(check_id(lid_or_suite))
+        if lout is None:
+            raise Fail(f"no loadout '{lid_or_suite}'")
+        sid = lout.get("suite", "")
+    if sid not in all_suites:
+        raise Fail(f"{sid} isn't installed")
+    bound = {}
+    for b in (lout or {}).get("keybinds") or []:
+        bound.setdefault(bind_command(b["lua"]), b["keys"])
+    choices = []
+    for pid, info in sorted(suite_plugins(sid, all_suites).items()):
+        name = info["manifest"].get("name") or pid
+        kinds = info["manifest"].get("kinds") or []
+        if any(k in kinds for k in ("panel", "overlay", "menu")):
+            cmd = f"omarchy-shell shell toggle {pid} '{{}}'"
+            cat, sc = categorize(pid + " " + name)
+            choices.append({"plugin": pid, "pluginName": name, "label": "Open " + name, "command": cmd,
+                            "call": f"shell toggle {pid}", "comment": info["manifest"].get("description", ""),
+                            "category": cat, "score": sc, "args": [], "shared": False})
+        for q in glob.glob(os.path.join(info["dir"], "**", "*.qml"), recursive=True):
+            for a in scan_ipc(q):
+                if QUERY_RE.match(a["function"]):
+                    continue   # a question (status, ping...), not something to do
+                shared = a["target"].startswith("omarchy.") or a["target"] == "notifications"
+                if shared and not show_all and sid != "omarchy.bar":
+                    continue
+                media = "media" in a["target"]
+                # (not the comment: comments mention other things too often)
+                base_text = f'{a["target"]} {a["function"]}'
+                if len(a["params"]) == 1 and a["values"]:
+                    for v in a["values"]:
+                        # the value says what it is (toggleTab system: the system monitor)
+                        cat, sc = categorize(v, media)
+                        if not sc:
+                            cat, sc = categorize(f'{a["target"]} {a["function"]} {v}', media)
+                        choices.append({"plugin": pid, "pluginName": name, "label": f'{split_words(a["function"])}: {v}',
+                                        "command": ipc_command(a["target"], a["function"], [v]),
+                                        "call": f'{a["target"]} {a["function"]} {v}', "comment": a["comment"],
+                                        "category": cat, "score": sc, "args": [], "shared": shared})
+                else:
+                    cat, sc = categorize(base_text if not a["params"] else f'{a["target"]} {a["function"]}', media)
+                    # a suite's own shell target, toggled or opened bare: its main panel
+                    if not sc and a["function"] in ("toggle", "open") and not a["params"] \
+                            and re.search(r"(^|-)shell$", a["target"]):
+                        cat, sc = "dashboard", 2
+                    choices.append({"plugin": pid, "pluginName": name, "label": split_words(a["function"]),
+                                    "command": ipc_command(a["target"], a["function"], [f"<{p}>" for p in a["params"]]),
+                                    "call": f'{a["target"]} {a["function"]}', "comment": a["comment"],
+                                    "category": cat, "score": sc, "args": a["params"], "shared": shared})
+    # the loadout's own keys are things it can do too (Ruixen's settings open
+    # through a launcher payload no IPC scan would find)
+    for b in (lout or {}).get("keybinds") or []:
+        cmd = bind_command(b["lua"])
+        if cmd and cmd not in {c["command"] for c in choices}:
+            cat, sc = categorize(b.get("desc", ""), "media" in cmd)   # your description says what it is
+            if not sc:
+                cat, sc = categorize(cmd, "media" in cmd)
+            choices.insert(0, {"plugin": "", "pluginName": "its keys", "label": b.get("desc", "") or cmd, "command": cmd,
+                               "call": cmd, "comment": "", "category": cat, "score": sc + 1, "args": [], "shared": False})
+    seen, uniq = set(), []
+    for c in choices:
+        if c["command"] not in seen:
+            seen.add(c["command"])
+            c["bound"] = bound.get(c["command"], "")
+            c["categoryName"] = CATEGORY_NAMES.get(c["category"], "")
+            uniq.append(c)
+    return {"loadout": lid_or_suite, "suite": sid, "suiteName": all_suites[sid]["name"], "actions": uniq,
+            "categories": [{"id": c[0], "name": c[1]} for c in CATEGORIES]}
+
+
+def bind_command(lua):
+    """What a bind runs: its last string (o.bind's command, or the one in
+    hl.dsp.exec_cmd(...))."""
+    strs = re.findall(r"""\[\[(.*?)\]\]|"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'""", lua, re.S)
+    vals = [next(g for g in t if g != "") if any(t) else "" for t in strs]
+    return vals[-1].replace('\\"', '"') if vals else ""
+
+
+def lua_str(s):
+    if '"' not in s and "\\" not in s and "\n" not in s:
+        return '"' + s + '"'
+    if "]]" not in s:
+        return "[[" + s + "]]"
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def bind_lua(keys, desc, command):
+    return f"o.bind({lua_str(keys)}, {lua_str(desc)}, {lua_str(command)})"
+
+
+def live_binds():
+    """Hyprland's binds now, by key combo (for "that's Omarchy's default for...")."""
+    path = os.environ.get("SHELL_SWAPPER_HYPRCTL_BINDS")
+    try:
+        if path:
+            data = read_json(path, [])
+        else:
+            data = json.loads(subprocess.run(["hyprctl", "binds", "-j"], capture_output=True, text=True, timeout=3).stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    out = {}
+    for b in data or []:
+        m = int(b.get("modmask", 0))
+        mods = [n for n, bit in (("SUPER", 64), ("CTRL", 4), ("ALT", 8), ("SHIFT", 1)) if m & bit]
+        out.setdefault(norm_keys(" + ".join(mods + [str(b.get("key", ""))])), b.get("description") or b.get("arg") or "")
+    return out
+
+
+def check_keys(lid, keys):
+    """Who uses a key combo now: your bindings.lua, this loadout, Omarchy."""
+    k = norm_keys(keys)
+    mine = [b for b in user_binds() if b["keys"] == k]
+    lout = loadouts().get(check_id(lid)) or {}
+    here = [b for b in lout.get("keybinds") or [] if b["keys"] == k]
+    cur_file = {b["keys"] for b in parse_binds(read_text(KEYS_FILE) or "") if b["kind"] == "bind"}
+    live = live_binds()
+    default = live.get(k, "") if not mine and k not in cur_file else ""
+    return {"keys": k, "bindings": [{"line": b["line"], "desc": b["desc"]} for b in mine],
+            "loadout": [{"desc": b.get("desc", "")} for b in here], "omarchy": default}
+
+
+def set_many(items, yes):
+    """Give loadouts keys: [{loadout, keys, command, desc}]. A loadout's key
+    for the same combo, or for the same command, is replaced."""
+    with Lock():
+        outs = loadouts()
+        active = status().get("active", "")
+        mine = {b["keys"]: b["line"] for b in user_binds()}
+        changes, touched, unchanged = [], {}, []
+        for it in items:
+            lid = check_id(str(it.get("loadout", "")))
+            if lid not in outs:
+                raise Fail(f"no loadout '{lid}'")
+            k = norm_keys(it.get("keys", ""))
+            cmd = str(it.get("command", "")).strip()
+            if not k or not cmd or "<" in cmd:
+                raise Fail("each key needs a key combo and a complete command (fill in its arguments)")
+            desc = str(it.get("desc", "")).strip() or cmd
+            d = touched.setdefault(lid, outs[lid])
+            old = d.get("keybinds") or []
+            # already that key for that call: leave it (and its description) be
+            if any(b["keys"] == k and bind_command(b["lua"]) == cmd for b in old):
+                unchanged.append({"loadout": lid, "loadoutName": d.get("name", lid), "keys": k, "command": cmd})
+                continue
+            new_lua = bind_lua(k, desc, cmd)
+            replaced = [b for b in old if (b["keys"] == k or cmd == bind_command(b["lua"])) and b["lua"] != new_lua]
+            old = [b for b in old if b["lua"] != new_lua]
+            d["keybinds"] = [b for b in old if b not in replaced] + [
+                {"keys": k, "desc": desc, "lua": bind_lua(k, desc, cmd)}]
+            changes.append({"loadout": lid, "loadoutName": d.get("name", lid), "keys": k, "desc": desc,
+                            "command": cmd, "replaces": [{"keys": b["keys"], "desc": b.get("desc", "")} for b in replaced],
+                            "clashLine": mine.get(k, 0), "activeNow": lid == active})
+        plan = {"action": "set " + ("these keys" if len(changes) > 1 else "this key"), "set": changes,
+                "unchanged": unchanged, "backupTo": KEY_BACKUPS}
+        if not changes:
+            return dict(plan, done=True, nothing=True)
+        if not yes:
+            raise NeedsYes(plan)
+        live = False
+        for lid, d in touched.items():
+            save_loadout(lid, d)
+            if lid == active and hook_file():
+                write_keys(keys_plan(d)["text"])
+                live = True
+        if live:
+            hypr_reload()
+        return dict(plan, done=True)
+
+
+def templates():
+    t = read_json(TEMPLATES, [])
+    return t if isinstance(t, list) else []
+
+
+def propose(keys, command, from_lid):
+    """A key set for one shell, offered for the similar call in every other
+    loadout: the best matches by category, for you to review."""
+    outs = loadouts()
+    src = actions_for(from_lid, show_all=True)
+    pick = next((a for a in src["actions"] if a["command"] == command), None)
+    cat = pick["category"] if pick else categorize(command)[0]
+    out = []
+    for lid, d in outs.items():
+        if lid == from_lid or not d.get("suite"):
+            continue
+        try:
+            acts = actions_for(lid)["actions"]
+        except Fail:
+            continue
+        def rank(a):
+            f = a["call"].split(" ")[1] if " " in a["call"] else ""
+            return -(a["score"] + (1 if f.startswith("toggle") else 0.5 if f.startswith(("open", "show")) else
+                                   -2 if f.startswith(("close", "hide")) else 0))
+        cands = sorted([a for a in acts if cat and a["category"] == cat and not a["args"]], key=rank)
+        out.append({"loadout": lid, "loadoutName": d.get("name", lid), "suite": d.get("suite"),
+                    "candidates": [{"label": a["label"], "command": a["command"], "pluginName": a["pluginName"],
+                                    "comment": a["comment"][:120], "bound": a.get("bound", "")} for a in cands[:6]],
+                    "clash": check_keys(lid, keys)})
+    return {"keys": norm_keys(keys), "command": command, "from": from_lid, "category": cat,
+            "categoryName": CATEGORY_NAMES.get(cat, ""), "label": pick["label"] if pick else command,
+            "proposals": out}
+
+
+def save_template(name, keys, category, binds):
+    with Lock():
+        ts = [t for t in templates() if t.get("name") != name and t.get("keys") != norm_keys(keys)]
+        ts.append({"name": name, "keys": norm_keys(keys), "category": category, "binds": binds, "saved": now()})
+        write_json(TEMPLATES, ts)
+        return {"saved": name}
+
+
 def backup_file(name):
     """A backup by its path under backups/ (original/bindings.lua,
     swaps/<t>/bindings.lua, keys/<file>), or just a keys/ file's name."""
@@ -1521,6 +1873,48 @@ def keys_cmd(rest):
         if len(args) < 3:
             raise Fail("keys add ID 'o.bind(\"KEYS\", \"what\", \"command\")'")
         return add_key(args[1], " ".join(args[2:]), yes)
+    if sub == "actions":
+        if len(args) < 2:
+            raise Fail("keys actions ID [--all]")
+        return actions_for(args[1], "--all" in rest)
+    if sub == "check":
+        if len(args) < 3:
+            raise Fail('keys check ID "SUPER + R"')
+        return check_keys(args[1], " ".join(args[2:]))
+    if sub == "set":
+        # keys set ID "SUPER + R" "Launcher" "omarchy-shell ..." [--yes]
+        if len(args) < 5:
+            raise Fail('keys set ID "KEYS" "what it does" "command"')
+        return set_many([{"loadout": args[1], "keys": args[2], "desc": args[3], "command": " ".join(args[4:])}], yes)
+    if sub == "set-many":
+        if len(args) < 2:
+            raise Fail("keys set-many JSON")
+        try:
+            items = json.loads(args[1])
+        except ValueError:
+            raise Fail("set-many takes a JSON list of {loadout, keys, desc, command}")
+        if not isinstance(items, list) or not items:
+            raise Fail("set-many takes a JSON list of {loadout, keys, desc, command}")
+        return set_many(items, yes)
+    if sub == "propose":
+        if len(args) < 4:
+            raise Fail('keys propose FROM_ID "KEYS" "command"')
+        return propose(args[2], " ".join(args[3:]), args[1])
+    if sub == "templates":
+        return {"templates": templates()}
+    if sub == "template-save":
+        if len(args) < 3:
+            raise Fail("keys template-save NAME JSON")
+        try:
+            t = json.loads(args[2])
+        except ValueError:
+            raise Fail("template-save takes JSON {keys, category, binds}")
+        return save_template(args[1], t.get("keys", ""), t.get("category", ""), t.get("binds", []))
+    if sub == "template-delete":
+        with Lock():
+            ts = [t for t in templates() if t.get("name") != (args[1] if len(args) > 1 else "")]
+            write_json(TEMPLATES, ts)
+        return {"templates": ts}
     if sub == "organize":
         return organize_keys(yes)
     if sub == "backups":

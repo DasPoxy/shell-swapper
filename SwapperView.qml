@@ -88,6 +88,19 @@ FocusScope {
         out.push({ text: "It goes back into your bindings.lua (line " + p.backToBindings.join(", ") + ").", tone: "add" })
       else if (p.activeNow) out.push({ text: "It stops working now: it's the shell you're using.", tone: "warn" })
     }
+    if (p.set) {
+      ;(p.unchanged || []).forEach(function(x) { out.push({ text: x.loadoutName + " already has " + x.keys + " for that: left as it is.", tone: "dim" }) })
+      out.push({ text: p.set.length > 1 ? "Sets these keys:" : "Sets this key:" })
+      p.set.forEach(function(x) {
+        out.push({ text: x.loadoutName + ":  " + x.keys + "  →  " + x.desc, tone: "add" })
+        out.push({ text: x.command, tone: "code" })
+        ;(x.replaces || []).forEach(function(r) { out.push({ text: "replaces its " + r.keys + " (" + r.desc + ")", tone: "warn" }) })
+        if (x.clashLine) out.push({ text: "your bindings.lua binds " + x.keys + " too (line " + x.clashLine + "): left out until that's sorted", tone: "warn" })
+      })
+      var live = p.set.filter(function(x) { return x.activeNow }).length
+      out.push({ text: live ? "The shell you're using gets its key now; the others when you swap to them (if you bring their keys)."
+                            : "They work when you swap to those shells (if you bring their keys).", tone: "dim" })
+    }
     if (p.diff && p.diff.length) {
       out.push({ text: "Only these lines change (- before, + after):" })
       p.diff.slice(2, 42).forEach(function(l) {
@@ -156,12 +169,189 @@ FocusScope {
   property int kcur0: 0
   property int kcur1: 0
   property var marked: ({})             // bindings.lua lines picked to move
-  function openKeys() {
+  function openKeys() { openBinds("file") }
+  // the Keybinds panel (k): its tabs are actions | file | templates
+  property string btab: "actions"
+  function openBinds(tab) {
     if (!sel || sel.kind !== "loadout") { say("Pick one of your shells to give it keys."); return }
     keysFor = sel.id; mode = "keys"; marked = ({}); kcur0 = 0; kcur1 = 0
     kcol = sel.l.keys.length ? 0 : 1
-    refreshScan()
+    btab = tab || "actions"
+    acur = 0; filter = ""; capturing = false; review = null
+    refreshScan(); refreshActions(); refreshTemplates()
   }
+
+  // ---- actions: what keys could do in this shell (its IPC calls) ----
+  property var acts: []                 // from shell-swapper keys actions
+  property string filter: ""
+  readonly property var shownActs: {
+    var f = filter.toLowerCase()
+    var list = acts.filter(function(a) {
+      return !f || (a.label + " " + a.call + " " + a.categoryName + " " + a.pluginName).toLowerCase().indexOf(f) >= 0
+    })
+    // its own keys first, then by plugin; headings between
+    var out = [], last = null
+    list.forEach(function(a) {
+      if (a.pluginName !== last) { out.push({ head: true, label: a.pluginName }); last = a.pluginName }
+      out.push(a)
+    })
+    return out
+  }
+  property int acur: 1
+  readonly property var act: shownActs[acur] && !shownActs[acur].head ? shownActs[acur] : null
+  function astep(d) {
+    var i = acur + d
+    while (i >= 0 && i < shownActs.length && shownActs[i].head) i += d
+    if (i >= 0 && i < shownActs.length) acur = i
+  }
+  onShownActsChanged: { if (acur >= shownActs.length || (shownActs[acur] && shownActs[acur].head)) { acur = 0; astep(1) } }
+  // the key being set: modifiers + one key
+  property var mods: ({ SUPER: true, CTRL: false, ALT: false, SHIFT: false })
+  property string bkey: ""
+  property bool capturing: false
+  property var argVals: ({})
+  property var checkInfo: null
+  readonly property string combo: {
+    if (!bkey) return ""
+    var m = ["SUPER", "CTRL", "ALT", "SHIFT"].filter(function(x) { return mods[x] })
+    return m.concat([bkey]).join(" + ")
+  }
+  readonly property string fullCommand: {
+    if (!act) return ""
+    var c = act.command
+    ;(act.args || []).forEach(function(p) {
+      var v = argVals[p] || ""
+      c = c.replace("'<" + p + ">'", v ? "'" + v.replace(/'/g, "'\\''") + "'" : "'<" + p + ">'")
+    })
+    return c
+  }
+  onActChanged: loadAct()
+  function loadAct() {
+    argVals = ({}); capturing = false
+    if (act && act.bound) {
+      var parts = act.bound.split(" + ")
+      var m = { SUPER: false, CTRL: false, ALT: false, SHIFT: false }
+      parts.slice(0, -1).forEach(function(x) { m[x] = true })
+      mods = m; bkey = parts[parts.length - 1]
+    } else { mods = { SUPER: true, CTRL: false, ALT: false, SHIFT: false }; bkey = "" }
+    recheck()
+  }
+  onComboChanged: recheck()
+  function recheck() {
+    checkInfo = null
+    if (!combo || !keysFor) return
+    checkProc.command = ["python3", script, "keys", "check", keysFor, combo]
+    checkProc.running = true
+  }
+  function toggleMod(m) { var x = Object.assign({}, mods); x[m] = !x[m]; mods = x }
+  // a key press while capturing: its name as Hyprland writes it
+  function keyName(e) {
+    var k = e.key
+    if (k >= Qt.Key_A && k <= Qt.Key_Z) return String.fromCharCode(k)
+    if (k >= Qt.Key_0 && k <= Qt.Key_9) return String.fromCharCode(k)
+    if (k >= Qt.Key_F1 && k <= Qt.Key_F24) return "F" + (k - Qt.Key_F1 + 1)
+    var names = {}
+    names[Qt.Key_Return] = "RETURN"; names[Qt.Key_Enter] = "RETURN"; names[Qt.Key_Space] = "SPACE"
+    names[Qt.Key_Backspace] = "BACKSPACE"; names[Qt.Key_Tab] = "TAB"; names[Qt.Key_Delete] = "DELETE"
+    names[Qt.Key_Slash] = "SLASH"; names[Qt.Key_Period] = "PERIOD"; names[Qt.Key_Comma] = "COMMA"
+    names[Qt.Key_Minus] = "MINUS"; names[Qt.Key_Equal] = "EQUAL"; names[Qt.Key_Semicolon] = "SEMICOLON"
+    names[Qt.Key_Apostrophe] = "APOSTROPHE"; names[Qt.Key_QuoteLeft] = "GRAVE"; names[Qt.Key_Backslash] = "BACKSLASH"
+    names[Qt.Key_BracketLeft] = "BRACKETLEFT"; names[Qt.Key_BracketRight] = "BRACKETRIGHT"
+    names[Qt.Key_Left] = "LEFT"; names[Qt.Key_Right] = "RIGHT"; names[Qt.Key_Up] = "UP"; names[Qt.Key_Down] = "DOWN"
+    names[Qt.Key_Home] = "HOME"; names[Qt.Key_End] = "END"; names[Qt.Key_PageUp] = "PRIOR"; names[Qt.Key_PageDown] = "NEXT"
+    names[Qt.Key_Print] = "PRINT"; names[Qt.Key_Insert] = "INSERT"
+    return names[k] || ""
+  }
+  function capture(e) {
+    var mk = { }
+    mk[Qt.Key_Meta] = "SUPER"; mk[Qt.Key_Super_L] = "SUPER"; mk[Qt.Key_Super_R] = "SUPER"
+    mk[Qt.Key_Control] = "CTRL"; mk[Qt.Key_Alt] = "ALT"; mk[Qt.Key_Shift] = "SHIFT"
+    if (e.key === Qt.Key_Escape) { capturing = false; return }
+    if (mk[e.key]) { var x = Object.assign({}, mods); x[mk[e.key]] = true; mods = x; return }
+    var n = keyName(e)
+    if (!n) { say("That key can't be used here.", true); return }
+    // modifiers held with the press win; otherwise the ones picked above stay
+    if (e.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier | Qt.MetaModifier))
+      mods = { SUPER: !!(e.modifiers & Qt.MetaModifier), CTRL: !!(e.modifiers & Qt.ControlModifier),
+               ALT: !!(e.modifiers & Qt.AltModifier), SHIFT: !!(e.modifiers & Qt.ShiftModifier) }
+    bkey = n; capturing = false
+  }
+  function setKey() {
+    if (!act) return
+    if (!combo) { capturing = true; say("Press the key (pick SUPER / CTRL / ALT / SHIFT above)."); return }
+    if (fullCommand.indexOf("'<") >= 0) { say("Fill in its arguments first.", true); return }
+    var item = [{ loadout: keysFor, keys: combo, desc: act.label.charAt(0).toUpperCase() + act.label.slice(1), command: fullCommand }]
+    planRun(["keys", "set-many", JSON.stringify(item)], function(ok) { if (ok) { say(combo + " is set."); refreshActions() } })
+  }
+  function clearKey() {
+    if (!act || !act.bound) return
+    var ks = keysLoadout ? keysLoadout.keys : []
+    for (var i = 0; i < ks.length; i++) if (ks[i].keys === act.bound) {
+      planRun(["keys", "remove", keysFor, String(i)], function(ok) { if (ok) { say("Cleared."); refreshActions() } })
+      return
+    }
+  }
+  function refreshActions() {
+    if (!keysFor) return
+    actsProc.command = ["python3", script, "keys", "actions", keysFor]
+    actsProc.running = true
+  }
+
+  // ---- templates: the same key for the similar call in your other shells ----
+  property var review: null             // {keys, label, categoryName, source, items: [{..., pick, on}], cur}
+  property var tmpls: []
+  property int tcur: 0
+  function startTemplate() {
+    if (!act) return
+    var k = combo || act.bound
+    if (!k) { say("Give it a key first, then make it a template.", true); return }
+    if (fullCommand.indexOf("'<") >= 0) { say("Fill in its arguments first.", true); return }
+    proposeProc.label = act.label
+    proposeProc.command = ["python3", script, "keys", "propose", keysFor, k, fullCommand]
+    proposeProc.running = true
+  }
+  function reviewMove(d) { if (review) { var r = Object.assign({}, review); r.cur = Math.max(0, Math.min(r.items.length - 1, r.cur + d)); review = r } }
+  function reviewCycle(d) {
+    if (!review || !review.items.length) return
+    var r = Object.assign({}, review), it = Object.assign({}, r.items[r.cur])
+    var n = it.candidates.length
+    // -1 = leave this shell alone
+    it.pick = it.pick + d
+    if (it.pick >= n) it.pick = -1
+    if (it.pick < -1) it.pick = n - 1
+    it.on = it.pick >= 0
+    var items = r.items.slice(); items[r.cur] = it; r.items = items; review = r
+  }
+  function reviewToggle() {
+    if (!review || !review.items.length) return
+    var r = Object.assign({}, review), it = Object.assign({}, r.items[r.cur])
+    if (it.pick < 0 && it.candidates.length) it.pick = 0
+    it.on = !it.on && it.pick >= 0
+    var items = r.items.slice(); items[r.cur] = it; r.items = items; review = r
+  }
+  function reviewApply() {
+    if (!review) return
+    var rv = review
+    // this shell's own key, unless it's already exactly that
+    var items = act && act.bound === rv.keys && act.command === rv.source ? []
+      : [{ loadout: keysFor, keys: rv.keys, desc: rv.desc, command: rv.source }]
+    rv.items.forEach(function(it) {
+      if (it.on && it.pick >= 0) {
+        var c = it.candidates[it.pick]
+        items.push({ loadout: it.loadout, keys: rv.keys, desc: rv.desc, command: c.command })
+      }
+    })
+    review = null
+    if (!items.length) { say("Nothing to set: no other shell was picked."); return }
+    planRun(["keys", "set-many", JSON.stringify(items)], function(ok) {
+      if (!ok) return
+      var binds = items.map(function(x) { return { loadout: x.loadout, command: x.command } })
+      run(["keys", "template-save", rv.desc, JSON.stringify({ keys: rv.keys, category: rv.category, binds: binds })])
+      say(rv.keys + " now does " + rv.desc.toLowerCase() + " in " + items.length + " shell" + (items.length === 1 ? "" : "s") + ".")
+      refreshActions(); refreshTemplates()
+    })
+  }
+  function refreshTemplates() { if (!tmplProc.running) tmplProc.running = true }
   function refreshScan() { if (!scanProc.running) scanProc.running = true }
   function toggleMark() {
     var b = scanBinds[kcur1]
@@ -281,6 +471,42 @@ FocusScope {
     }
   }
   Process {
+    id: actsProc
+    stdout: StdioCollector { onStreamFinished: { try { sw.acts = JSON.parse(text).actions || [] } catch (e) {} } }
+    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
+  }
+  Process {
+    id: checkProc
+    stdout: StdioCollector { onStreamFinished: { try { sw.checkInfo = JSON.parse(text) } catch (e) { sw.checkInfo = null } } }
+  }
+  Process {
+    id: proposeProc
+    property string label: ""
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var r = null
+        try { r = JSON.parse(text) } catch (e) { return }
+        var lbl = proposeProc.label
+        sw.review = {
+          keys: r.keys, source: r.command, category: r.category,
+          categoryName: r.categoryName || "",
+          desc: (r.categoryName || lbl).replace(/^./, function(c) { return c.toUpperCase() }),
+          label: lbl, cur: 0,
+          items: r.proposals.map(function(p) {
+            return { loadout: p.loadout, loadoutName: p.loadoutName, candidates: p.candidates, clash: p.clash,
+                     pick: p.candidates.length ? 0 : -1, on: p.candidates.length > 0 }
+          })
+        }
+      }
+    }
+    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
+  }
+  Process {
+    id: tmplProc
+    command: ["python3", sw.script, "keys", "templates"]
+    stdout: StdioCollector { onStreamFinished: { try { sw.tmpls = JSON.parse(text).templates || [] } catch (e) {} } }
+  }
+  Process {
     id: scanProc
     command: ["python3", sw.script, "keys", "scan"]
     stdout: StdioCollector { onStreamFinished: { try { sw.scan = JSON.parse(text).binds || [] } catch (e) {} } }
@@ -313,6 +539,45 @@ FocusScope {
       e.accepted = true
       return
     }
+    if (mode === "keys" && capturing) { capture(e); e.accepted = true; return }
+    if (mode === "keys" && review) {
+      if (k === Qt.Key_Up) reviewMove(-1)
+      else if (k === Qt.Key_Down) reviewMove(1)
+      else if (k === Qt.Key_Left) reviewCycle(-1)
+      else if (k === Qt.Key_Right) reviewCycle(1)
+      else if (k === Qt.Key_Space) reviewToggle()
+      else if (k === Qt.Key_Return || k === Qt.Key_Enter) reviewApply()
+      else if (k === Qt.Key_Escape) review = null
+      e.accepted = true
+      return
+    }
+    if (mode === "keys" && (k === Qt.Key_1 || k === Qt.Key_2 || k === Qt.Key_3)) {
+      btab = k === Qt.Key_1 ? "actions" : k === Qt.Key_2 ? "file" : "templates"
+      e.accepted = true
+      return
+    }
+    if (mode === "keys" && btab === "actions") {
+      if (k === Qt.Key_Down) astep(1)
+      else if (k === Qt.Key_Up) astep(-1)
+      else if (k === Qt.Key_Return || k === Qt.Key_Enter) setKey()
+      else if (k === Qt.Key_C) { if (act) capturing = true }
+      else if (k === Qt.Key_X) clearKey()
+      else if (k === Qt.Key_T) startTemplate()
+      else if (k === Qt.Key_Slash) { filterInput.forceActiveFocus() }
+      else if (k === Qt.Key_Escape) { if (filter) filter = ""; else mode = "list" }
+      else return
+      e.accepted = true
+      return
+    }
+    if (mode === "keys" && btab === "templates") {
+      if (k === Qt.Key_Down) tcur = Math.min(tmpls.length - 1, tcur + 1)
+      else if (k === Qt.Key_Up) tcur = Math.max(0, tcur - 1)
+      else if (k === Qt.Key_D) { if (tmpls[tcur]) run(["keys", "template-delete", tmpls[tcur].name], function() { refreshTemplates() }) }
+      else if (k === Qt.Key_Escape) mode = "list"
+      else return
+      e.accepted = true
+      return
+    }
     if (mode === "keys") {
       var n0 = keysLoadout ? keysLoadout.keys.length : 0
       if (k === Qt.Key_Tab || k === Qt.Key_Left || k === Qt.Key_Right || k === Qt.Key_H || k === Qt.Key_L) kcol = kcol ? 0 : 1
@@ -329,7 +594,8 @@ FocusScope {
       return
     }
     if (k === Qt.Key_Down || k === Qt.Key_J) step(1)
-    else if (k === Qt.Key_Up || k === Qt.Key_K) step(-1)
+    else if (k === Qt.Key_Up) step(-1)
+    else if (k === Qt.Key_K) openBinds("actions")
     else if (k === Qt.Key_Home) { cursor = 0; clampCursor() }
     else if (k === Qt.Key_End) { cursor = rows.length - 1; clampCursor() }
     else if (k === Qt.Key_Return || k === Qt.Key_Enter) swap()
@@ -419,8 +685,10 @@ FocusScope {
   Text {
     anchors.right: parent.right
     y: sw.px(5)
-    text: sw.mode === "keys" ? "tab side  ↑↓ pick  space mark  m move in  d take out  o tidy  esc back"
-      : "↑↓ pick  ⏎ swap  b keys  s save  r rename  d delete  esc close"
+    text: sw.mode === "keys" ? (sw.btab === "actions" ? "1 2 3 tabs  ↑↓ pick  / search  c key  ⏎ set  x clear  t other shells  esc back"
+        : sw.btab === "templates" ? "1 2 3 tabs  ↑↓ pick  d forget  esc back"
+        : "1 2 3 tabs  tab side  ↑↓ pick  space mark  m move in  d take out  o tidy  esc back")
+          : "↑↓ pick  ⏎ swap  k keybinds  s save  r rename  d delete  esc close"
     color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10)
   }
   Column {
@@ -647,7 +915,7 @@ FocusScope {
             hint: "Enter"; on: true
             onClicked: sw.swap()
           }
-          Btn { visible: !!detail.r && detail.r.kind === "loadout"; text: "Keys"; hint: "b"; onClicked: sw.openKeys() }
+          Btn { visible: !!detail.r && detail.r.kind === "loadout"; text: "Keybinds"; hint: "k"; onClicked: sw.openBinds("actions") }
           Btn { visible: !!detail.r && detail.r.kind === "loadout"; text: "Rename"; hint: "r"; onClicked: sw.startRename() }
           Btn {
             visible: !!detail.r && detail.r.kind === "loadout"
@@ -670,17 +938,35 @@ FocusScope {
       id: keysHead
       width: parent.width
       spacing: 6
-      Text {
-        textFormat: Text.PlainText
-        text: "Keys for " + (sw.keysLoadout ? sw.keysLoadout.name : "")
-        color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(15); font.bold: true
+      Row {
+        spacing: 14
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
+          text: "Keybinds for " + (sw.keysLoadout ? sw.keysLoadout.name : "")
+          color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(15); font.bold: true
+        }
+        Repeater {
+          model: [["actions", "1", "Its actions"], ["file", "2", "From bindings.lua"], ["templates", "3", "Templates"]]
+          Btn {
+            required property var modelData
+            text: modelData[2]; hint: modelData[1]
+            on: sw.btab === modelData[0]
+            onClicked: { sw.btab = modelData[0]; sw.forceActiveFocus() }
+          }
+        }
       }
       Text {
         width: parent.width
         wrapMode: Text.Wrap
-        text: "Keys you move in here only work while this is your shell (and only if you say so when you swap). "
-          + "In bindings.lua they're gathered under this shell's heading. Nothing changes without asking you, and "
-          + "everything is backed up first (your original bindings.lua is kept for good)."
+        text: sw.btab === "actions"
+          ? "What this shell can do (its own IPC calls and panels). Pick one, give it a key, and press t to offer the same key "
+            + "for the similar call in your other shells: you review each one before anything is set."
+          : sw.btab === "templates"
+          ? "Keys you've set across shells at once. Each shell keeps its own call; d forgets a template (the keys stay)."
+          : "Keys you move in here only work while this is your shell (and only if you say so when you swap). "
+            + "In bindings.lua they're gathered under this shell's heading. Nothing changes without asking you, and "
+            + "everything is backed up first (your original bindings.lua is kept for good)."
         color: sw.dim; font.family: sw.font; font.pixelSize: sw.px(11)
       }
       // not set up yet: one line in hyprland.lua loads the loadout keys
@@ -705,7 +991,208 @@ FocusScope {
       }
     }
 
+    // ---- tab 1: its actions ----
     Item {
+      visible: sw.btab === "actions"
+      anchors { top: keysHead.bottom; topMargin: 12; bottom: parent.bottom; left: parent.left; right: parent.right }
+      Column {
+        id: aLeft
+        width: Math.round(parent.width * 0.48)
+        height: parent.height
+        spacing: 6
+        Rectangle {
+          width: parent.width
+          height: sw.px(28)
+          radius: sw.rad
+          color: sw.rowFill
+          border.color: filterInput.activeFocus ? sw.accent : sw.line
+          Text { visible: !filterInput.text; x: 10; anchors.verticalCenter: parent.verticalCenter; text: "/ search actions"; color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(11) }
+          TextInput {
+            id: filterInput
+            x: 10; width: parent.width - 20
+            anchors.verticalCenter: parent.verticalCenter
+            text: sw.filter
+            onTextChanged: sw.filter = text
+            color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(11)
+            Keys.onReturnPressed: sw.forceActiveFocus()
+            Keys.onEscapePressed: { text = ""; sw.forceActiveFocus() }
+            Keys.onDownPressed: { sw.forceActiveFocus(); sw.astep(1) }
+          }
+        }
+        ListView {
+          id: aList
+          width: parent.width
+          height: parent.height - y
+          clip: true
+          spacing: 3
+          model: sw.shownActs
+          currentIndex: sw.acur
+          onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+          boundsBehavior: Flickable.StopAtBounds
+          delegate: Item {
+            id: aslot
+            required property var modelData
+            required property int index
+            width: aList.width
+            height: modelData.head ? sw.px(24) : sw.px(38)
+            Heading { visible: !!aslot.modelData.head; anchors.bottom: parent.bottom; anchors.bottomMargin: 3; text: String(aslot.modelData.label || "").toUpperCase() }
+            Rectangle {
+              visible: !aslot.modelData.head
+              anchors.fill: parent
+              radius: sw.rad
+              readonly property bool cur: aslot.index === sw.acur
+              color: cur ? sw.cursorFill : aMouse.containsMouse ? sw.hoverFill : sw.rowFill
+              border.color: cur ? sw.accent : "transparent"
+              Column {
+                x: 10; width: parent.width - 20 - aBadge.width
+                anchors.verticalCenter: parent.verticalCenter
+                Text { width: parent.width; elide: Text.ElideRight; textFormat: Text.PlainText; text: aslot.modelData.label || ""; color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(12) }
+                Text {
+                  width: parent.width; elide: Text.ElideRight; textFormat: Text.PlainText
+                  text: (aslot.modelData.categoryName ? aslot.modelData.categoryName + "  ·  " : "") + (aslot.modelData.call || "")
+                  color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(9)
+                }
+              }
+              Text {
+                id: aBadge
+                anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
+                textFormat: Text.PlainText
+                text: aslot.modelData.bound || ""
+                color: sw.accent; font.family: sw.font; font.pixelSize: sw.px(10)
+              }
+              MouseArea { id: aMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { sw.acur = aslot.index; sw.forceActiveFocus() } }
+            }
+          }
+        }
+      }
+
+      // the key editor for the one picked
+      Column {
+        anchors { left: aLeft.right; leftMargin: 18; right: parent.right }
+        spacing: 9
+        visible: !!sw.act
+        Text { width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; text: sw.act ? sw.act.label.charAt(0).toUpperCase() + sw.act.label.slice(1) : ""; color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(15); font.bold: true }
+        Text { width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; text: sw.act ? sw.act.pluginName + (sw.act.categoryName ? "  ·  " + sw.act.categoryName : "") : ""; color: sw.dim; font.family: sw.font; font.pixelSize: sw.px(11) }
+        Text { visible: !!sw.act && !!sw.act.comment; width: parent.width; wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight; textFormat: Text.PlainText; text: sw.act ? sw.act.comment : ""; color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10) }
+        // its arguments, if it takes any
+        Repeater {
+          model: sw.act ? sw.act.args : []
+          Row {
+            required property string modelData
+            spacing: 8
+            Text { width: sw.px(80); anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: modelData; color: sw.dim; font.family: sw.font; font.pixelSize: sw.px(11) }
+            Rectangle {
+              width: sw.px(220); height: sw.px(26); radius: sw.rad; color: sw.rowFill
+              border.color: argIn.activeFocus ? sw.accent : sw.line
+              TextInput {
+                id: argIn
+                x: 8; width: parent.width - 16; anchors.verticalCenter: parent.verticalCenter
+                color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(11)
+                onTextChanged: { var v = Object.assign({}, sw.argVals); v[modelData] = text; sw.argVals = v }
+                Keys.onReturnPressed: sw.forceActiveFocus()
+                Keys.onEscapePressed: sw.forceActiveFocus()
+              }
+            }
+          }
+        }
+        Text { width: parent.width; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText; text: sw.fullCommand; color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10) }
+
+        Heading { text: "ITS KEY" }
+        Row {
+          spacing: 6
+          Repeater {
+            model: ["SUPER", "CTRL", "ALT", "SHIFT"]
+            Btn { required property string modelData; text: modelData; on: !!sw.mods[modelData]; onClicked: sw.toggleMod(modelData) }
+          }
+          Text { anchors.verticalCenter: parent.verticalCenter; text: "+"; color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(12) }
+          // press a key here
+          Rectangle {
+            width: Math.max(sw.px(90), capText.implicitWidth + 20)
+            height: sw.px(28)
+            radius: sw.rad
+            color: sw.capturing ? sw.tint(sw.accent, 0.18) : capMouse.containsMouse ? sw.hoverFill : sw.rowFill
+            border.color: sw.capturing ? sw.accent : sw.line
+            Text {
+              id: capText
+              anchors.centerIn: parent
+              text: sw.capturing ? "press a key…" : (sw.bkey || "set (c)")
+              color: sw.capturing || sw.bkey ? sw.fg : sw.faint
+              font.family: sw.font; font.pixelSize: sw.px(11); font.bold: !!sw.bkey && !sw.capturing
+            }
+            MouseArea { id: capMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { sw.capturing = true; sw.forceActiveFocus() } }
+          }
+        }
+        // who has that key now
+        Text {
+          width: parent.width
+          wrapMode: Text.Wrap
+          visible: !!sw.combo
+          textFormat: Text.PlainText
+          readonly property var c: sw.checkInfo
+          text: !c ? "" : c.bindings.length ? sw.combo + " is bound in your bindings.lua (line " + c.bindings[0].line + ", " + c.bindings[0].desc + "): it would be left out until that's moved or removed."
+            : c.loadout.length && sw.act && sw.act.bound !== sw.combo ? sw.combo + " is this shell's key for " + c.loadout[0].desc + " now: it'd do this instead."
+            : c.omarchy ? sw.combo + " is Omarchy's key for \"" + c.omarchy + "\": this replaces it while this shell is in use."
+            : sw.act && sw.act.bound === sw.combo ? sw.combo + " already does this." : sw.combo + " is free."
+          color: c && c.bindings.length ? sw.urgent : c && (c.loadout.length || c.omarchy) ? sw.accent : sw.dim
+          font.family: sw.font; font.pixelSize: sw.px(11)
+        }
+        Flow {
+          width: parent.width
+          spacing: 6
+          Btn { text: sw.act && sw.act.bound ? "Change key" : "Set key"; hint: "Enter"; on: true; onClicked: sw.setKey() }
+          Btn { visible: !!sw.act && !!sw.act.bound; text: "Clear key"; hint: "x"; onClicked: sw.clearKey() }
+          Btn { text: "Same key in other shells…"; hint: "t"; onClicked: sw.startTemplate() }
+        }
+      }
+    }
+
+    // ---- tab 3: templates ----
+    Item {
+      visible: sw.btab === "templates"
+      anchors { top: keysHead.bottom; topMargin: 12; bottom: parent.bottom; left: parent.left; right: parent.right }
+      Text {
+        visible: sw.tmpls.length === 0
+        width: parent.width; wrapMode: Text.Wrap
+        text: "None yet. In its actions (1), give something a key and press t: the same key is offered for the similar call in each of your other shells."
+        color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(11)
+      }
+      ListView {
+        anchors.fill: parent
+        clip: true
+        spacing: 6
+        model: sw.tmpls
+        delegate: Rectangle {
+          id: trow
+          required property var modelData
+          required property int index
+          width: ListView.view.width
+          height: tcol.implicitHeight + 16
+          radius: sw.rad
+          color: index === sw.tcur ? sw.cursorFill : sw.rowFill
+          border.color: index === sw.tcur ? sw.accent : "transparent"
+          Column {
+            id: tcol
+            x: 12; y: 8; width: parent.width - 24
+            spacing: 3
+            Text { textFormat: Text.PlainText; text: trow.modelData.keys + "   " + trow.modelData.name; color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(12); font.bold: true }
+            Repeater {
+              model: trow.modelData.binds || []
+              Text {
+                required property var modelData
+                width: tcol.width; elide: Text.ElideRight; textFormat: Text.PlainText
+                text: modelData.loadout + ":  " + modelData.command
+                color: sw.dim; font.family: sw.font; font.pixelSize: sw.px(10)
+              }
+            }
+          }
+          MouseArea { anchors.fill: parent; onClicked: { sw.tcur = trow.index; sw.forceActiveFocus() } }
+        }
+      }
+    }
+
+    // ---- tab 2: from your bindings.lua ----
+    Item {
+      visible: sw.btab === "file"
       anchors { top: keysHead.bottom; topMargin: 12; bottom: parent.bottom; left: parent.left; right: parent.right }
       // left: the loadout's keys
       Column {
@@ -763,6 +1250,87 @@ FocusScope {
             cur: sw.kcol === 1 && index === sw.kcur1
             onClicked: { sw.kcol = 1; sw.kcur1 = index; sw.toggleMark() }
           }
+        }
+      }
+    }
+  }
+
+  // ---- reviewing a template: the same key in your other shells ----
+  Rectangle {
+    anchors.fill: parent
+    visible: !!sw.review
+    z: 45
+    color: sw.tint(sw.solid, 0.8)
+    radius: sw.rad
+    MouseArea { anchors.fill: parent; onClicked: {} }
+    Rectangle {
+      width: Math.min(parent.width - 60, sw.px(680))
+      height: rvCol.implicitHeight + 36
+      anchors.centerIn: parent
+      radius: sw.rad
+      color: sw.solid
+      border.color: sw.accent
+      Column {
+        id: rvCol
+        x: 18; y: 18
+        width: parent.width - 36
+        spacing: 8
+        Text {
+          width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
+          text: sw.review ? sw.review.keys + " for " + (sw.review.categoryName || sw.review.label).toLowerCase() + " in your other shells?" : ""
+          color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(15); font.bold: true
+        }
+        Text {
+          width: parent.width; wrapMode: Text.Wrap
+          text: "Each shell gets the call most like it. Check them: ←/→ picks another call (or leaves that shell alone), space turns one off. "
+            + "Nothing is set until you say so on the next screen."
+          color: sw.dim; font.family: sw.font; font.pixelSize: sw.px(11)
+        }
+        Repeater {
+          model: sw.review ? sw.review.items : []
+          Rectangle {
+            id: rvrow
+            required property var modelData
+            required property int index
+            readonly property var cand: modelData.pick >= 0 ? modelData.candidates[modelData.pick] : null
+            width: rvCol.width
+            height: rvInner.implicitHeight + 14
+            radius: sw.rad
+            color: sw.review && index === sw.review.cur ? sw.cursorFill : sw.rowFill
+            border.color: sw.review && index === sw.review.cur ? sw.accent : "transparent"
+            Column {
+              id: rvInner
+              x: 10; y: 7; width: parent.width - 20
+              spacing: 2
+              Text {
+                textFormat: Text.PlainText
+                text: (rvrow.modelData.on ? "\u2713  " : "     ") + rvrow.modelData.loadoutName
+                color: rvrow.modelData.on ? sw.accent : sw.faint; font.family: sw.font; font.pixelSize: sw.px(12); font.bold: true
+              }
+              Text {
+                width: parent.width; elide: Text.ElideRight; textFormat: Text.PlainText
+                text: rvrow.cand ? "‹  " + rvrow.cand.label + "  ›     " + rvrow.cand.command
+                  + (sw.review && rvrow.cand.bound === sw.review.keys ? "     (already its key)" : "")
+                  : rvrow.modelData.candidates.length ? "‹  leave this shell alone  ›" : "nothing similar in this shell"
+                color: rvrow.modelData.on ? sw.fg : sw.faint; font.family: sw.font; font.pixelSize: sw.px(11)
+              }
+              Text {
+                visible: !!rvrow.modelData.clash && (rvrow.modelData.clash.bindings.length > 0 || rvrow.modelData.clash.loadout.length > 0)
+                  && !(rvrow.cand && sw.review && rvrow.cand.bound === sw.review.keys)
+                width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
+                text: !rvrow.modelData.clash ? "" : rvrow.modelData.clash.bindings.length
+                  ? "your bindings.lua binds it too (line " + rvrow.modelData.clash.bindings[0].line + "): it'd be left out there"
+                  : rvrow.modelData.clash.loadout.length ? "replaces its key for " + rvrow.modelData.clash.loadout[0].desc : ""
+                color: sw.urgent; font.family: sw.font; font.pixelSize: sw.px(10)
+              }
+            }
+            MouseArea { anchors.fill: parent; onClicked: { var r = Object.assign({}, sw.review); r.cur = rvrow.index; sw.review = r; sw.reviewCycle(1) } }
+          }
+        }
+        Row {
+          spacing: 8
+          Btn { text: "Review and set"; hint: "Enter"; on: true; onClicked: sw.reviewApply() }
+          Btn { text: "Cancel"; hint: "Esc"; onClicked: sw.review = null }
         }
       }
     }
@@ -891,7 +1459,9 @@ FocusScope {
     }
     Text {
       width: parent.width
-      height: text === "" ? 0 : implicitHeight
+      visible: text !== ""
+      maximumLineCount: 2
+      elide: Text.ElideRight
       wrapMode: Text.Wrap
       textFormat: Text.PlainText
       text: sw.status

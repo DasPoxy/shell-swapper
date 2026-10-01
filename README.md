@@ -65,9 +65,9 @@ o.bind("SUPER + CTRL + ALT + BACKSPACE", "Shell-Swapper rescue", "shell-swapper 
 
 | key | does |
 |---|---|
-| ↑ ↓ (j k) | pick a loadout, or a suite to start fresh from |
+| ↑ ↓ | pick a loadout, or a suite to start fresh from |
 | Enter (or double-click) | swap to it |
-| b | its keys (see [Keys](#keys)) |
+| k | its keybinds (see [Keybinds](#keybinds)) |
 | s | save the current shell as a new loadout (or update one by its name) |
 | r | rename the loadout |
 | d, d | delete it (to `~/.local/state/shell-swapper/trash/`) |
@@ -76,6 +76,28 @@ o.bind("SUPER + CTRL + ALT + BACKSPACE", "Shell-Swapper rescue", "shell-swapper 
 The right side sketches the loadout's bar: what sits left, centre and right.
 Along the bottom: **apply by** *restart* (the sure way) or *reload* (Omarchy
 hot-reloads `shell.json`, no restart flash), and the keep-it timer.
+
+## Keybinds
+
+**k** (or the *Keybinds* button) on a loadout opens its keybinds:
+
+- **1 Its actions.** Everything that shell can do from a key, found by
+  scanning its own plugins for IPC calls (`omarchy-shell slime-shell
+  toggleTab home`, `omarchy-shell ruixen.notch toggleDashboard`...) and its
+  panels (`omarchy-shell shell toggle <plugin>`), plus the keys it already
+  has. Calls that list their options in a comment get one entry per option;
+  others take their arguments in boxes. Pick one, set its key (the
+  SUPER / CTRL / ALT / SHIFT buttons, then press **c** and a key), and see
+  straight away who has that key now: your `bindings.lua`, this shell, or
+  Omarchy's defaults.
+- **Same key in other shells (t).** Each action has a category (dashboard,
+  launcher, settings, wallpapers, tasks, media...). Your key is offered for
+  the most similar call in every other shell: Slime's command centre on
+  SUPER+ALT+C becomes Ruixen's notch dashboard on SUPER+ALT+C. You review each
+  one (←/→ picks another call or leaves that shell alone, space turns one
+  off), then see the full plan before anything is set. It's kept as a
+  template (**3 Templates**).
+- **2 From bindings.lua.** Move keys you already have into the shell (below).
 
 ## Keys
 
@@ -143,6 +165,12 @@ shell-swapper keys move ID "SUPER + R" ...   # from bindings.lua into a loadout
 shell-swapper keys remove ID N               # out again (back to bindings.lua)
 shell-swapper keys add ID 'o.bind("SUPER + R", "Launcher", "my-launcher")'
 shell-swapper keys organize                  # gather each loadout's keys into its group
+shell-swapper keys actions ID                # what that shell can do: its IPC calls, by category
+shell-swapper keys check ID "SUPER + ALT + C"   # who has that key now
+shell-swapper keys set ID "SUPER + ALT + C" "Dashboard" "omarchy-shell ruixen.notch toggleDashboard"
+shell-swapper keys set-many '[{"loadout": ..., "keys": ..., "desc": ..., "command": ...}]'
+shell-swapper keys propose ID "SUPER + ALT + C" "omarchy-shell slime-shell toggleTab home"
+shell-swapper keys templates | template-save NAME JSON | template-delete NAME
 shell-swapper backups                        # everything kept, by kind
 shell-swapper keys restore original          # your bindings.lua from before Shell-Swapper
 shell-swapper keys restore swaps/<time>/bindings.lua
