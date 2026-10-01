@@ -60,6 +60,11 @@ fi
 if [[ $(readlink -f "$plugin_dir" 2>/dev/null) == "$here" ]] \
    && command -v omarchy-shell >/dev/null && omarchy-shell shell ping >/dev/null 2>&1; then
   omarchy-shell shell rescanPlugins >/dev/null || true
+  # discovery is asynchronous: wait (up to 4 s) until the shell knows it
+  for _ in $(seq 40); do
+    omarchy-plugin-list --json 2>/dev/null | grep -q '"shell-swapper"' && break
+    sleep 0.1
+  done
   omarchy-shell shell setPluginEnabled shell-swapper true >/dev/null || true
   echo "enabled the shell-swapper plugin"
 fi
