@@ -71,7 +71,10 @@ omarchy plugin add https://github.com/DasPoxy/shell-swapper
 
 `install.sh` links the `shell-swapper` CLI into `~/.local/bin` (pointing back
 at the plugin, so updates reach it) and prints the keys to add to
-`~/.config/hypr/bindings.lua`:
+`~/.config/hypr/bindings.lua`. Run from a checkout of your own elsewhere, it
+copies that checkout in as the plugin (a real folder: some shells' plugin
+catalogs won't follow a symlinked one); `install.sh --sync` copies your edits
+in again, and `install.sh --dev-hooks` does that after every commit and pull.
 
 ```lua
 o.bind("SUPER + CTRL + ALT + S", "Shell-Swapper", "omarchy-shell shell toggle shell-swapper '{}'")
