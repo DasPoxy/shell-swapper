@@ -36,6 +36,22 @@ Commands (all print JSON; errors go to stderr with exit status 1):
   delete ID                     (not the active one)
   config [KEY VALUE]            settings: apply = restart | reload, confirmSeconds
 
+Keys (a loadout's own keybinds, in hypr/shell_swapper.lua; your bindings.lua
+is only touched when you move keys in or out, and always backed up first):
+  apply ... --keys | --keep-keys   when the loadout's keys differ from the ones
+                                you have: bring them too, or keep yours
+  keys status                   the hook, the keys live now, recent backups
+  keys hook                     add the one line that loads loadout keys
+  keys scan                     the binds in your bindings.lua (line numbers)
+  keys list ID | keys diff ID   a loadout's keys | what swapping to it changes
+  keys move ID LINE...          move binds from bindings.lua into a loadout
+                                (commented out there, tagged to come back)
+  keys remove ID N              take key N out (back to bindings.lua if it came from there)
+  keys add ID 'o.bind(...)'     give a loadout a key
+  keys backups | keys restore BACKUP
+Anything that would change the keys you have now prints its plan and exits
+with status 2 instead; run it again with --yes to do it.
+
 Environment (tests): SHELL_SWAPPER_RESTART (default "omarchy restart shell"),
 SHELL_SWAPPER_RELOAD, SHELL_SWAPPER_LOCKED (default
 "omarchy-hyprland-session-locked"), OMARCHY_PATH.
@@ -378,6 +394,404 @@ def compose(cur, target, all_suites):
     return new
 
 
+# ---- keybinds ------------------------------------------------------------------
+#
+# A loadout can carry its own keys (Slime's launcher on SUPER+R, Ruixen's on
+# SUPER+X...). They're written to their own file, hypr/shell_swapper.lua,
+# loaded by one guarded line after your bindings.lua, so a swap never edits
+# your own keys. Anything that changes the keys you have right now only says
+# what it would do, unless it's given --yes (the picker asks you first), and
+# every keybind file is backed up before it's written.
+
+HYPR = os.path.join(HOME, ".config/hypr")
+BINDINGS = os.path.join(HYPR, "bindings.lua")
+HYPRLAND = os.path.join(HYPR, "hyprland.lua")
+KEYS_FILE = os.path.join(HYPR, "shell_swapper.lua")
+KEY_BACKUPS = os.path.join(STATE, "keybind-backups")
+LAST_GOOD_KEYS = os.path.join(STATE, "last-good-keys.lua")
+KEEP_KEY_BACKUPS = 40
+HOOK_BEGIN = "-- >>> shell-swapper keys >>>"
+HOOK_END = "-- <<< shell-swapper keys <<<"
+HOOK = [HOOK_BEGIN,
+        "-- Keys that belong to your Shell-Swapper loadouts, kept in hypr/shell_swapper.lua",
+        "-- (written by Shell-Swapper on a swap). Remove this block to stop loading them.",
+        'pcall(require, "hypr.shell_swapper")',
+        HOOK_END]
+MOVED_TAG = "--[shell-swapper:{}] "
+MODS = ["SUPER", "CTRL", "ALT", "SHIFT"]
+
+
+class NeedsYes(Exception):
+    """A change to your keys: here's what it would do; run again with --yes."""
+    def __init__(self, plan):
+        super().__init__("needs --yes")
+        self.plan = plan
+
+
+def norm_keys(k):
+    parts = [p.strip().upper() for p in str(k).split("+") if p.strip()]
+    parts = ["CTRL" if p in ("CONTROL", "CTL") else p for p in parts]
+    mods = [m for m in MODS if m in parts]
+    rest = [p for p in parts if p not in MODS]
+    return " + ".join(mods + rest)
+
+
+def lua_statements(text):
+    """Top-level statements of a Lua file, as (start, end) offsets: comments
+    skipped, strings and brackets respected, a statement ending at a newline
+    once its brackets are closed."""
+    out, i, n, depth, start = [], 0, len(text), 0, None
+
+    def long_close(j):
+        m = re.match(r"\[(=*)\[", text[j:])
+        return ("]" + m.group(1) + "]", j + len(m.group(0))) if m else (None, j)
+
+    while i < n:
+        c = text[i]
+        if text.startswith("--", i):
+            close, j = long_close(i + 2)
+            if close:
+                k = text.find(close, j)
+                i = n if k < 0 else k + len(close)
+            else:
+                k = text.find("\n", i)
+                i = n if k < 0 else k
+            continue
+        if c in "\"'":
+            if start is None:
+                start = i
+            j = i + 1
+            while j < n and text[j] != c and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if c == "[":
+            close, j = long_close(i)
+            if close:
+                if start is None:
+                    start = i
+                k = text.find(close, j)
+                i = n if k < 0 else k + len(close)
+                continue
+        if c == "\n":
+            if start is not None and depth <= 0:
+                out.append((start, i))
+                start, depth = None, 0
+            i += 1
+            continue
+        if c in "({[":
+            depth += 1
+        elif c in ")}]":
+            depth -= 1
+        if start is None and not c.isspace():
+            start = i
+        i += 1
+    if start is not None:
+        out.append((start, n))
+    return out
+
+
+BIND_RE = re.compile(r"""(o\.bind_toggle|o\.bind|hl\.bind|hl\.unbind)\s*\(\s*(["'])((?:\\.|(?!\2).)*)\2""", re.S)
+STR_ARG_RE = re.compile(r"""\s*,\s*(["'])((?:\\.|(?!\1).)*)\1""", re.S)
+
+
+def classify(stmt):
+    m = BIND_RE.match(stmt.strip())
+    if not m:
+        return None
+    fn, keys = m.group(1), m.group(3)
+    desc = ""
+    if fn.startswith("o.bind"):
+        d = STR_ARG_RE.match(stmt.strip()[m.end():])
+        desc = d.group(2) if d else ""
+    return {"kind": "unbind" if fn == "hl.unbind" else "bind", "keys": norm_keys(keys), "rawKeys": keys, "desc": desc}
+
+
+def parse_binds(text):
+    """Binds and unbinds in a Lua file: line numbers, keys, description, code."""
+    out = []
+    for s, e in lua_statements(text):
+        stmt = text[s:e].rstrip()
+        info = classify(stmt)
+        if info:
+            info.update({"line": text.count("\n", 0, s) + 1, "endLine": text.count("\n", 0, e) + 1,
+                         "start": s, "end": e, "lua": stmt})
+            out.append(info)
+    return out
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def write_text(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def key_backup(path):
+    """Copy a keybind file into the backups before it's written. Returns the
+    copy ("" if there was no file yet)."""
+    text = read_text(path)
+    if text is None:
+        return ""
+    os.makedirs(KEY_BACKUPS, exist_ok=True)
+    dest = os.path.join(KEY_BACKUPS, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+                        + "-" + os.path.basename(path))
+    write_text(dest, text)
+    for old in sorted(glob.glob(os.path.join(KEY_BACKUPS, "*")))[:-KEEP_KEY_BACKUPS]:
+        os.remove(old)
+    return dest
+
+
+def hypr_reload():
+    run_cmd("SHELL_SWAPPER_HYPR_RELOAD", "hyprctl reload")
+
+
+def hook_file():
+    for f in (HYPRLAND, BINDINGS):
+        if HOOK_BEGIN in (read_text(f) or ""):
+            return f
+    return ""
+
+
+def user_binds():
+    """Your own keys, in bindings.lua (Shell-Swapper's hook block aside)."""
+    return [b for b in parse_binds(read_text(BINDINGS) or "") if b["kind"] == "bind"]
+
+
+def render_keys(name, binds):
+    lines = ["-- Shell-Swapper: keys for the \"" + name.replace("\n", " ") + "\" loadout.",
+             "-- Written on every swap: change them in the picker (k), not here. Your own",
+             "-- keys stay in bindings.lua.", ""]
+    for b in binds:
+        lines.append(f'hl.unbind("{b["keys"]}")')
+        lines.append(b["lua"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def keys_plan(loadout):
+    """What writing `loadout`'s keys would change, against the keys file as it
+    is: keys added and removed, and keys skipped because bindings.lua binds
+    them too (both would fire)."""
+    mine = {b["keys"]: b for b in user_binds()}
+    binds = (loadout or {}).get("keybinds") or []
+    conflicts = [dict(keys=b["keys"], desc=b.get("desc", ""), line=mine[b["keys"]]["line"])
+                 for b in binds if b["keys"] in mine]
+    use = [b for b in binds if b["keys"] not in mine]
+    text = render_keys((loadout or {}).get("name", "no loadout"), use) if loadout else ""
+    cur_text = read_text(KEYS_FILE) or ""
+    cur = {b["keys"]: b for b in parse_binds(cur_text) if b["kind"] == "bind"}
+    new = {b["keys"]: b for b in use}
+    return {"text": text, "changes": text.strip() != cur_text.strip() and bool(cur or new),
+            "add": [{"keys": k, "desc": new[k].get("desc", "")} for k in new if k not in cur or cur[k]["lua"] != new[k]["lua"]],
+            "remove": [{"keys": k, "desc": cur[k].get("desc", "")} for k in cur if k not in new],
+            "conflicts": conflicts}
+
+
+def write_keys(text):
+    """Write the keys file (backed up first). The caller has asked."""
+    b = key_backup(KEYS_FILE)
+    existed = os.path.exists(KEYS_FILE)
+    write_text(KEYS_FILE, text)
+    return {"backup": b, "existed": existed}
+
+
+def restore_keys(info):
+    """Undo write_keys (a revert): the old file back, or none if there wasn't one."""
+    key_backup(KEYS_FILE)
+    old = read_text(info.get("backup", "")) if info.get("backup") else None
+    if old is not None:
+        write_text(KEYS_FILE, old)
+    elif not info.get("existed") and os.path.exists(KEYS_FILE):
+        os.remove(KEYS_FILE)
+
+
+def keys_status():
+    active = status().get("active", "")
+    outs = loadouts()
+    cur = read_text(KEYS_FILE)
+    return {"hook": hook_file(), "file": KEYS_FILE, "fileExists": cur is not None,
+            "live": [{"keys": b["keys"], "desc": b["desc"]} for b in parse_binds(cur or "") if b["kind"] == "bind"],
+            "active": active,
+            "activeKeys": len((outs.get(active) or {}).get("keybinds") or []),
+            "backups": sorted(os.path.basename(p) for p in glob.glob(os.path.join(KEY_BACKUPS, "*")))[-10:]}
+
+
+def install_hook(yes):
+    if hook_file():
+        return {"hook": hook_file(), "installed": False, "already": True}
+    text = read_text(HYPRLAND)
+    target, at = HYPRLAND, None
+    if text is not None:
+        lines = text.split("\n")
+        for i, l in enumerate(lines):
+            if re.match(r"""\s*require\s*\(?\s*["']hypr\.bindings["']\s*\)?\s*$""", l):
+                at = i + 1
+                break
+    if at is None:   # no require of bindings.lua to follow: the end of bindings.lua
+        target, text = BINDINGS, read_text(BINDINGS) or ""
+        at = len(text.rstrip("\n").split("\n"))
+    plan = {"action": "add the keys hook", "file": target, "afterLine": at, "lines": HOOK,
+            "backupTo": KEY_BACKUPS}
+    if not yes:
+        raise NeedsYes(plan)
+    lines = text.split("\n")
+    key_backup(target)
+    new = lines[:at] + HOOK + lines[at:]
+    write_text(target, "\n".join(new))
+    if not os.path.exists(KEYS_FILE):
+        write_text(KEYS_FILE, "-- Shell-Swapper: no loadout keys yet.\n")
+    hypr_reload()
+    return dict(plan, installed=True)
+
+
+def tag_lines(stmt, lid):
+    return "\n".join(MOVED_TAG.format(lid) + l for l in stmt.split("\n"))
+
+
+def move_keys(lid, line_nos, yes):
+    """Move binds from bindings.lua into loadout `lid`: they're commented out
+    there (tagged, so they can come back), with any hl.unbind of the same key."""
+    with Lock():
+        outs = loadouts()
+        if check_id(lid) not in outs:
+            raise Fail(f"no loadout '{lid}'")
+        if not hook_file():
+            raise Fail("loadout keys aren't loaded yet: set that up first (shell-swapper keys hook)")
+        text = read_text(BINDINGS)
+        if text is None:
+            raise Fail(f"can't read {BINDINGS}")
+        allb = parse_binds(text)
+        picked = [b for b in allb if b["kind"] == "bind" and b["line"] in line_nos]
+        if not picked:
+            raise Fail("no binds on those lines of bindings.lua")
+        have = {b["keys"] for b in outs[lid].get("keybinds") or []}
+        dup = [b for b in picked if b["keys"] in have]
+        picked = [b for b in picked if b["keys"] not in have]
+        keys = {b["keys"] for b in picked}
+        unbinds = [b for b in allb if b["kind"] == "unbind" and b["keys"] in keys]
+        active = status().get("active", "") == lid
+        plan = {"action": "move keys into " + outs[lid].get("name", lid), "loadout": lid,
+                "move": [{"line": b["line"], "keys": b["keys"], "desc": b["desc"]} for b in picked],
+                "alsoCommentOut": [{"line": b["line"], "lua": b["lua"]} for b in unbinds],
+                "alreadyThere": [b["keys"] for b in dup],
+                "activeNow": active,
+                "note": ("they keep working now (it's the shell you're using)" if active else
+                         "they'll only work while " + outs[lid].get("name", lid) + " is your shell"),
+                "backupTo": KEY_BACKUPS}
+        if not picked:
+            raise Fail("those keys are already in that loadout")
+        if not yes:
+            raise NeedsYes(plan)
+        key_backup(BINDINGS)
+        # comment out from the bottom up, so the offsets stay right
+        for b in sorted(picked + unbinds, key=lambda b: b["start"], reverse=True):
+            text = text[:b["start"]] + tag_lines(text[b["start"]:b["end"]].rstrip(), lid) + text[b["end"]:]
+        d = outs[lid]
+        d["keybinds"] = (d.get("keybinds") or []) + [
+            {"keys": b["keys"], "desc": b["desc"], "lua": b["lua"], "from": "bindings.lua"} for b in picked]
+        save_loadout(lid, d)
+        write_text(BINDINGS, text)
+        if active and hook_file():
+            write_keys(keys_plan(d)["text"])
+        hypr_reload()
+        return dict(plan, moved=True)
+
+
+def remove_key(lid, idx, yes):
+    """Take a key out of a loadout. If it came from bindings.lua, it goes back
+    there (un-commented)."""
+    with Lock():
+        outs = loadouts()
+        if check_id(lid) not in outs:
+            raise Fail(f"no loadout '{lid}'")
+        d = outs[lid]
+        binds = d.get("keybinds") or []
+        if not 0 <= idx < len(binds):
+            raise Fail(f"no key {idx} in {lid}")
+        b = binds[idx]
+        text = read_text(BINDINGS) or ""
+        tag = MOVED_TAG.format(lid)
+        back = [i for i, l in enumerate(text.split("\n"))
+                if l.startswith(tag) and (classify(l[len(tag):]) or {}).get("keys") == b["keys"]]
+        active = status().get("active", "") == lid
+        plan = {"action": "take " + b["keys"] + " out of " + d.get("name", lid), "loadout": lid,
+                "keys": b["keys"], "desc": b.get("desc", ""),
+                "backToBindings": [i + 1 for i in back], "activeNow": active, "backupTo": KEY_BACKUPS}
+        live = active or back
+        if live and not yes:
+            raise NeedsYes(plan)
+        d["keybinds"] = binds[:idx] + binds[idx + 1:]
+        save_loadout(lid, d)
+        if back:
+            key_backup(BINDINGS)
+            lines = text.split("\n")
+            for i in back:
+                # the statement's first line, then the rest of it (tagged
+                # lines that don't start a statement of their own)
+                lines[i] = lines[i][len(tag):]
+                j = i + 1
+                while j < len(lines) and lines[j].startswith(tag) and not classify(lines[j][len(tag):]):
+                    lines[j] = lines[j][len(tag):]
+                    j += 1
+            write_text(BINDINGS, "\n".join(lines))
+        if active and hook_file():
+            write_keys(keys_plan(d)["text"])
+        if live:
+            hypr_reload()
+        return dict(plan, removed=True)
+
+
+def add_key(lid, lua, yes):
+    with Lock():
+        outs = loadouts()
+        if check_id(lid) not in outs:
+            raise Fail(f"no loadout '{lid}'")
+        info = classify(lua)
+        if not info or info["kind"] != "bind":
+            raise Fail("that isn't a bind: o.bind(\"KEYS\", \"what it does\", \"command\") or hl.bind(...)")
+        d = outs[lid]
+        binds = [b for b in d.get("keybinds") or [] if b["keys"] != info["keys"]]
+        binds.append({"keys": info["keys"], "desc": info["desc"], "lua": lua.strip()})
+        active = status().get("active", "") == lid
+        plan = {"action": "add " + info["keys"] + " to " + d.get("name", lid), "loadout": lid,
+                "keys": info["keys"], "desc": info["desc"], "activeNow": active, "backupTo": KEY_BACKUPS}
+        if active and hook_file() and not yes:
+            raise NeedsYes(plan)
+        d["keybinds"] = binds
+        save_loadout(lid, d)
+        if active and hook_file():
+            write_keys(keys_plan(d)["text"])
+            hypr_reload()
+        return dict(plan, added=True)
+
+
+def restore_key_backup(name, yes):
+    check = os.path.basename(name)
+    src = os.path.join(KEY_BACKUPS, check)
+    if check != name or not os.path.isfile(src):
+        raise Fail(f"no keybind backup '{name}'")
+    target = next((f for f in (BINDINGS, HYPRLAND, KEYS_FILE) if check.endswith("-" + os.path.basename(f))), None)
+    if not target:
+        raise Fail("can't tell which file that backup is of")
+    plan = {"action": "restore " + os.path.basename(target) + " from a backup", "file": target, "from": src,
+            "backupTo": KEY_BACKUPS}
+    if not yes:
+        raise NeedsYes(plan)
+    key_backup(target)
+    write_text(target, read_text(src))
+    hypr_reload()
+    return dict(plan, restored=True)
+
+
 # ---- applying ----------------------------------------------------------------
 
 def run_cmd(env_key, default, detach=False):
@@ -441,7 +855,9 @@ def target_for(arg, all_suites, outs):
     return arg, t
 
 
-def apply(arg, confirm=True):
+def apply(arg, confirm=True, keys=None):
+    """keys: "swap" (the loadout's keys come too), "keep" (yours stay as they
+    are) or None (ask: NeedsYes with what would change)."""
     if locked():
         raise Fail("the screen is locked; swap after unlocking")
     with Lock():
@@ -455,7 +871,7 @@ def apply(arg, confirm=True):
         # keep tweaks made since: the shell you're leaving is saved first
         if active in outs and outs[active].get("suite") == bar_id(cur):
             snap = snapshot(cur, outs[active].get("name", active), bar_id(cur))
-            for k in ("note", "preview"):
+            for k in ("note", "preview", "keybinds"):
                 if k in outs[active]:
                     snap[k] = outs[active][k]
             save_loadout(active, snap)
@@ -464,9 +880,18 @@ def apply(arg, confirm=True):
             lid = unique_id(target["name"], set(outs))
             save_loadout(lid, dict(target, saved=now()))
         new = compose(cur, target, all_suites)
-        if new == cur:
+        kplan = keys_plan(target) if hook_file() else None
+        keys_change = bool(kplan and kplan["changes"])
+        if keys_change and keys is None:
+            if created:
+                os.remove(loadout_path(lid))
+            raise NeedsYes({"action": "swap to " + target.get("name", lid), "loadout": arg,
+                            "keys": {k: kplan[k] for k in ("add", "remove", "conflicts")},
+                            "choose": "--keys (its keys come too) or --keep-keys (yours stay as they are)"})
+        if new == cur and not (keys_change and keys == "swap"):
             set_status(active=lid)
             return {"applied": lid, "changed": False}
+        kinfo = write_keys(kplan["text"]) if keys_change and keys == "swap" else None
         bpath = backup(cur)
         if not os.path.exists(LAST_GOOD):
             write_json(LAST_GOOD, cur)
@@ -476,7 +901,7 @@ def apply(arg, confirm=True):
         if confirm:
             write_json(PENDING, {"token": token, "from": active, "to": lid,
                                  "toName": outs.get(lid, target).get("name", lid),
-                                 "backup": bpath, "created": created, "started": time.time(),
+                                 "backup": bpath, "created": created, "keys": kinfo, "started": time.time(),
                                  "deadline": time.time() + SETTLE_SECONDS, "seen": False,
                                  "confirmSeconds": c["confirmSeconds"], "mode": c["apply"]})
             subprocess.Popen([sys.executable, os.path.abspath(__file__), "_watchdog", token],
@@ -484,10 +909,23 @@ def apply(arg, confirm=True):
                              stderr=subprocess.DEVNULL, start_new_session=True)
         else:
             write_json(LAST_GOOD, new)
+            keep_good_keys()
         set_status(active=lid, previous=active if active != lid else st.get("previous", ""))
+    if kinfo is not None:
+        hypr_reload()
     bring_up(c["apply"])
     return {"applied": lid, "changed": True, "pending": confirm, "token": token if confirm else "",
-            "backup": bpath, "mode": c["apply"]}
+            "backup": bpath, "mode": c["apply"], "keysSwapped": kinfo is not None}
+
+
+def keep_good_keys():
+    """The keys that go with the last kept config (rescue puts them back)."""
+    text = read_text(KEYS_FILE)
+    if text is None:
+        if os.path.exists(LAST_GOOD_KEYS):
+            os.remove(LAST_GOOD_KEYS)
+    else:
+        write_text(LAST_GOOD_KEYS, text)
 
 
 def revert(token=None, why="reverted"):
@@ -502,12 +940,16 @@ def revert(token=None, why="reverted"):
             os.remove(PENDING)
             raise Fail("no backup to go back to")
         write_json(SHELL_JSON, b)
+        if p.get("keys"):
+            restore_keys(p["keys"])
         os.remove(PENDING)
         # a suite's default layout that was never kept isn't a loadout yet
         if p.get("created") and os.path.exists(loadout_path(p["to"])):
             os.remove(loadout_path(p["to"]))
         set_status(active=p.get("from", ""), previous=status().get("previous", ""), lastRevert=why)
         mode = p.get("mode", "restart")
+    if p.get("keys"):
+        hypr_reload()
     bring_up(mode)
     return {"reverted": True, "active": p.get("from", ""), "why": why}
 
@@ -518,6 +960,7 @@ def confirm(token=None):
         if not p or (token and p["token"] != token):
             return {"confirmed": False}
         write_json(LAST_GOOD, shell_config())
+        keep_good_keys()
         os.remove(PENDING)
         set_status(active=p["to"], lastRevert="")
         return {"confirmed": True, "active": p["to"]}
@@ -559,6 +1002,11 @@ def rescue():
         if isinstance(cur, dict):
             backup(cur)
         write_json(SHELL_JSON, good)
+        good_keys = read_text(LAST_GOOD_KEYS)
+        if good_keys is not None and hook_file() and good_keys != read_text(KEYS_FILE):
+            key_backup(KEYS_FILE)
+            write_text(KEYS_FILE, good_keys)
+            hypr_reload()
         if os.path.exists(PENDING):
             os.remove(PENDING)
         # which loadout is that? the one with the same bar, if any
@@ -581,7 +1029,9 @@ def listing():
     all_suites, outs, st = suites(), loadouts(), status()
     cur = shell_config()
     used = {d.get("suite") for d in outs.values()}
+    mine = {b["keys"]: b["line"] for b in user_binds()}
     return {
+        "keysHook": hook_file(),
         "active": st.get("active", ""),
         "previous": st.get("previous", ""),
         "lastRevert": st.get("lastRevert", ""),
@@ -593,7 +1043,9 @@ def listing():
                       "installed": d.get("suite", "") in all_suites, "saved": d.get("saved", ""),
                       "note": d.get("note", ""), "preview": d.get("preview", ""),
                       "position": (d.get("bar") or {}).get("position", "top"),
-                      "layout": summary_bar(d.get("bar")), "active": lid == st.get("active")}
+                      "layout": summary_bar(d.get("bar")), "active": lid == st.get("active"),
+                      "keys": [{"keys": b["keys"], "desc": b.get("desc", ""), "clashLine": mine.get(b["keys"], 0)}
+                               for b in d.get("keybinds") or []]}
                      for lid, d in outs.items()],
         "suites": [{"id": s["id"], "name": s["name"], "description": s["description"],
                     "hasLoadout": s["id"] in used} for s in all_suites.values()],
@@ -629,8 +1081,9 @@ def run(argv):
                 same = [l for l, d in outs.items() if d.get("name", "").lower() == name.lower()]
                 lid = same[0] if same else unique_id(name, set(outs))
             snap = snapshot(cur, name, sid)
-            if lid in outs and outs[lid].get("preview"):
-                snap["preview"] = outs[lid]["preview"]
+            for k in ("note", "preview", "keybinds"):
+                if lid in outs and k in outs[lid]:
+                    snap[k] = outs[lid][k]
             save_loadout(lid, snap)
             set_status(active=lid)
             write_json(LAST_GOOD, cur)
@@ -642,7 +1095,7 @@ def run(argv):
             prev = status().get("previous", "")
             if not prev:
                 raise Fail("no previous loadout")
-            return apply(prev)
+            return apply(prev, keys=keys_flag(rest))
         if rest[0] == "--suite":
             if len(rest) < 2:
                 raise Fail("--suite needs a bar id")
@@ -652,8 +1105,10 @@ def run(argv):
                           reverse=True)
             act = status().get("active", "")
             pick = act if any(lid == act for _, lid in mine) else (mine[0][1] if mine else "suite:" + rest[1])
-            return apply(pick, confirm="--no-confirm" not in rest)
-        return apply(rest[0], confirm="--no-confirm" not in rest)
+            return apply(pick, confirm="--no-confirm" not in rest, keys=keys_flag(rest))
+        return apply(rest[0], confirm="--no-confirm" not in rest, keys=keys_flag(rest))
+    if cmd == "keys":
+        return keys_cmd(rest)
     if cmd == "confirm":
         return confirm(rest[0] if rest else None)
     if cmd == "revert":
@@ -704,9 +1159,81 @@ def run(argv):
     raise Fail(f"unknown command '{cmd}' (see --help)")
 
 
+def keys_flag(rest):
+    return "swap" if "--keys" in rest else "keep" if "--keep-keys" in rest else None
+
+
+def keys_cmd(rest):
+    yes = "--yes" in rest
+    args = [a for a in rest if a != "--yes"]
+    with Lock():
+        seed()
+    sub = args[0] if args else "status"
+    if sub == "status":
+        return keys_status()
+    if sub == "hook":
+        return install_hook(yes)
+    if sub == "scan":
+        outs = loadouts()
+        owners = {}
+        for lid, d in outs.items():
+            for b in d.get("keybinds") or []:
+                owners.setdefault(b["keys"], []).append(lid)
+        return {"file": BINDINGS, "binds": [{"line": b["line"], "endLine": b["endLine"], "kind": b["kind"],
+                                             "keys": b["keys"], "desc": b["desc"], "lua": b["lua"],
+                                             "inLoadouts": owners.get(b["keys"], [])}
+                                            for b in parse_binds(read_text(BINDINGS) or "")]}
+    if sub == "list":
+        if len(args) < 2:
+            raise Fail("keys list ID")
+        d = loadouts().get(check_id(args[1]))
+        if d is None:
+            raise Fail(f"no loadout '{args[1]}'")
+        plan = keys_plan(d)
+        clash = {c["keys"] for c in plan["conflicts"]}
+        return {"loadout": args[1], "keys": [dict(i=i, keys=b["keys"], desc=b.get("desc", ""), lua=b["lua"],
+                                                  clash=b["keys"] in clash)
+                                             for i, b in enumerate(d.get("keybinds") or [])]}
+    if sub == "diff":
+        if len(args) < 2:
+            raise Fail("keys diff ID")
+        d = loadouts().get(check_id(args[1]))
+        if d is None:
+            raise Fail(f"no loadout '{args[1]}'")
+        plan = keys_plan(d)
+        return {k: plan[k] for k in ("changes", "add", "remove", "conflicts")}
+    if sub == "move":
+        if len(args) < 3:
+            raise Fail("keys move ID LINE [LINE...]")
+        try:
+            nums = [int(a) for a in args[2:]]
+        except ValueError:
+            raise Fail("lines are numbers (see keys scan)")
+        return move_keys(args[1], nums, yes)
+    if sub == "remove":
+        if len(args) < 3 or not args[2].isdigit():
+            raise Fail("keys remove ID N")
+        return remove_key(args[1], int(args[2]), yes)
+    if sub == "add":
+        if len(args) < 3:
+            raise Fail("keys add ID 'o.bind(\"KEYS\", \"what\", \"command\")'")
+        return add_key(args[1], " ".join(args[2:]), yes)
+    if sub == "backups":
+        return {"dir": KEY_BACKUPS, "backups": sorted(os.path.basename(p) for p in glob.glob(os.path.join(KEY_BACKUPS, "*")))}
+    if sub == "restore":
+        if len(args) < 2:
+            raise Fail("keys restore BACKUP")
+        return restore_key_backup(args[1], yes)
+    raise Fail(f"unknown keys command '{sub}' (see --help)")
+
+
 def main():
     try:
         out = run(sys.argv[1:])
+    except NeedsYes as e:
+        # nothing changed: here's what would, for you (or the picker) to ask
+        print(json.dumps({"needsYes": True, "plan": e.plan}, ensure_ascii=False))
+        sys.exit(2)
     except Fail as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)

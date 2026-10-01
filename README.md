@@ -27,6 +27,8 @@ reverts itself unless you keep it.
   never comes up to ask is put back too.
 - **Rescue.** `shell-swapper rescue` (bind it to a key) puts back the last
   shell you kept and restarts, even when the bar won't start.
+- **Keys per shell.** A loadout can carry its own keybinds (Slime's launcher
+  on SUPER+R, Ruixen's on SUPER+X...). See [Keys](#keys).
 - **Backups.** `shell.json` is backed up before every swap (the last 20, in
   `~/.local/state/shell-swapper/backups/`), and swaps never run while the
   screen is locked.
@@ -57,6 +59,7 @@ o.bind("SUPER + CTRL + ALT + BACKSPACE", "Shell-Swapper rescue", "shell-swapper 
 |---|---|
 | ↑ ↓ (j k) | pick a loadout, or a suite to start fresh from |
 | Enter (or double-click) | swap to it |
+| b | its keys (see [Keys](#keys)) |
 | s | save the current shell as a new loadout (or update one by its name) |
 | r | rename the loadout |
 | d, d | delete it (to `~/.local/state/shell-swapper/trash/`) |
@@ -65,6 +68,31 @@ o.bind("SUPER + CTRL + ALT + BACKSPACE", "Shell-Swapper rescue", "shell-swapper 
 The right side sketches the loadout's bar: what sits left, centre and right.
 Along the bottom: **apply by** *restart* (the sure way) or *reload* (Omarchy
 hot-reloads `shell.json`, no restart flash), and the keep-it timer.
+
+## Keys
+
+A loadout can have keys of its own. They live in a file of their own,
+`~/.config/hypr/shell_swapper.lua`, loaded by one guarded line after your
+`bindings.lua` (`pcall(require, "hypr.shell_swapper")`, so nothing breaks if
+the file goes away). Swapping writes that file, never your `bindings.lua`.
+
+- **Nothing changes without asking.** Setting up that one line, moving keys
+  in or out, and a swap whose keys differ from the ones you have all show you
+  exactly what would change first. A swap asks *Swap keys too / Keep my keys
+  / Cancel*.
+- **Everything is backed up first.** `bindings.lua`, `hyprland.lua` and the
+  keys file are copied to `~/.local/state/shell-swapper/keybind-backups/`
+  before every write (the last 40). Going back from a swap, and rescue, put
+  the keys back too.
+- **Moving keys in** (b, then pick keys from your `bindings.lua` with space
+  and press m): they're commented out in `bindings.lua`, tagged with the
+  loadout, not deleted, along with any `hl.unbind` of the same key. Taking a
+  key out of the loadout (d) un-comments it again, exactly as it was.
+- **No double keys.** A loadout key that your `bindings.lua` binds too would
+  fire both, so it's left out (and shown in red) until you sort it out.
+- Each loadout key is written with an `hl.unbind` before it, so it replaces
+  Omarchy's default for that key while the loadout is in use, and the
+  default comes back when you swap to a shell without it.
 
 ## The command line
 
@@ -81,6 +109,16 @@ shell-swapper save "Work bar"       # the current shell, as a loadout
 shell-swapper rename ID NAME | delete ID
 shell-swapper config apply reload   # or restart; config confirmSeconds 30
 shell-swapper rescue
+
+# keys: anything that would change the keys you have now prints its plan and
+# exits with status 2; run it again with --yes to do it
+shell-swapper apply ruixen-bar --keys        # or --keep-keys
+shell-swapper keys status | hook | scan      # the hook, your bindings.lua's binds
+shell-swapper keys list ID | diff ID
+shell-swapper keys move ID LINE...           # from bindings.lua into a loadout
+shell-swapper keys remove ID N               # out again (back to bindings.lua)
+shell-swapper keys add ID 'o.bind("SUPER + R", "Launcher", "my-launcher")'
+shell-swapper keys backups | restore BACKUP
 ```
 
 ## For suite authors
@@ -107,6 +145,7 @@ starting fresh. Slime Shell, Ruixen and Omarchy's bar have these built in.
 |---|---|
 | `~/.config/shell-swapper/loadouts/*.json` | your loadouts |
 | `~/.config/shell-swapper/config.json` | apply mode, keep-it timer |
-| `~/.local/state/shell-swapper/` | backups, the last kept config, a waiting swap |
+| `~/.local/state/shell-swapper/` | backups (shell.json and keybind files), the last kept config, a waiting swap |
+| `~/.config/hypr/shell_swapper.lua` | the keys of the loadout in use (written on a swap) |
 
 MIT licensed.
