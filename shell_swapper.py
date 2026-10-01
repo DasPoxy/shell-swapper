@@ -249,11 +249,24 @@ def ruled_ids(all_suites):
     return out
 
 
+def plugin_source(d):
+    """Where a plugin folder came from: a copy carries .synced-from naming its
+    checkout (Slime Shell, Shell-Swapper copy themselves in); else itself."""
+    try:
+        with open(os.path.join(d, ".synced-from"), encoding="utf-8") as f:
+            src = f.readline().strip()
+        if src and os.path.isdir(src):
+            return os.path.realpath(src)
+    except OSError:
+        pass
+    return d
+
+
 def default_bar(suite_id, all_suites):
     """A suite's default bar config, for a fresh loadout."""
     r = rules(suite_id, all_suites)
     if r.get("layout"):
-        b = read_json(os.path.normpath(os.path.join(all_suites[suite_id]["dir"], r["layout"])), None)
+        b = read_json(os.path.normpath(os.path.join(plugin_source(all_suites[suite_id]["dir"]), r["layout"])), None)
         if isinstance(b, dict):
             b = dict(b)
             b["id"] = suite_id
@@ -1577,13 +1590,14 @@ def find_keys(lid):
     marks = shell_targets(sid, all_suites)
     roots = set()
     for pid, info in suite_plugins(sid, all_suites).items():
-        top = subprocess.run(["git", "-C", info["dir"], "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        src = plugin_source(info["dir"])
+        top = subprocess.run(["git", "-C", src, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
         root = top.stdout.strip() if top.returncode == 0 else ""
         # a repo holding the plugins folder itself (~/.config/omarchy under
         # git, say) isn't this shell's: just its own plugin folders then
         plugins_home = os.path.realpath(PLUGIN_DIRS[0])
         if not root or plugins_home == root or plugins_home.startswith(root + os.sep):
-            root = info["dir"]
+            root = src
         roots.add(root)
     found, files = [], []
     for root in sorted(roots):

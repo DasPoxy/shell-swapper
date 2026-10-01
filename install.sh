@@ -5,16 +5,22 @@
 #
 # After `omarchy plugin add`, run it from the plugin's folder:
 #   ~/.config/omarchy/plugins/shell-swapper/install.sh
-# From a copy elsewhere (for personal tweaks), it also links that checkout in
-# as the plugin and enables it.
+# From a checkout elsewhere (for personal tweaks), it copies that checkout in
+# as the plugin (a real folder, not a link: some shells' plugin catalogs won't
+# follow a symlinked plugin) and enables it. Then:
+#   install.sh --sync        copy your edits in again
+#   install.sh --dev-hooks   do that after every commit, pull and checkout
 set -euo pipefail
 
 here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 plugin_dir="$HOME/.config/omarchy/plugins/shell-swapper"
 
+mode=install
 case ${1:-} in
   "") ;;
-  -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+  --sync) mode=sync ;;
+  --dev-hooks) mode=hooks ;;
+  -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
   *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
 esac
 
@@ -53,11 +59,49 @@ link() {
   echo "linked $at -> $target"
 }
 
-# a checkout outside the plugins folder: link it in as the plugin
-if [[ $(readlink -f "$plugin_dir" 2>/dev/null) != "$here" ]]; then
-  link "$here" "$plugin_dir"
+# A checkout outside the plugins folder is copied in as the plugin, with
+# .synced-from naming it. A link from an older install is swapped for the
+# folder in one step (mv -T --exchange); a folder that isn't ours is left be.
+sync_in() {
+  [[ $(readlink -f "$plugin_dir" 2>/dev/null) == "$here" && ! -L $plugin_dir ]] && return 0   # installed in place
+  mkdir -p "$(dirname "$plugin_dir")"
+  if [[ -L $plugin_dir ]]; then
+    if ! ours "$plugin_dir"; then
+      echo "skipping $plugin_dir: it links to $(readlink "$plugin_dir"), which isn't Shell-Swapper's" >&2; return 1
+    fi
+    local tmp; tmp="$(dirname "$plugin_dir")/.sync-shell-swapper"
+    rm -rf "$tmp"
+    rsync -a --exclude __pycache__ --exclude .git --exclude demo "$here/" "$tmp/"
+    printf '%s\n' "$here" > "$tmp/.synced-from"
+    mv -T --exchange "$tmp" "$plugin_dir" || { rm -rf "$tmp"; echo "couldn't replace the link $plugin_dir" >&2; return 1; }
+    [[ -L $tmp ]] && rm -f "$tmp"
+    echo "copied $here into $plugin_dir (it was a link)"
+  elif [[ -e $plugin_dir && ! -f $plugin_dir/.synced-from ]]; then
+    echo "skipping $plugin_dir: something that isn't Shell-Swapper's copy is there" >&2; return 1
+  else
+    rsync -a --delete --delay-updates --exclude __pycache__ --exclude .git --exclude demo --exclude .synced-from \
+      "$here/" "$plugin_dir/"
+    [[ $(cat "$plugin_dir/.synced-from" 2>/dev/null) == "$here" ]] || printf '%s\n' "$here" > "$plugin_dir/.synced-from"
+  fi
+  return 0
+}
+
+if [[ $mode == sync ]]; then sync_in; exit $?; fi
+if [[ $mode == hooks ]]; then
+  [[ -d $here/.git/hooks ]] || { echo "not a git checkout: no hooks" >&2; exit 1; }
+  for h in post-commit post-merge post-checkout; do
+    if [[ -e $here/.git/hooks/$h ]] && ! grep -q 'install.sh --sync' "$here/.git/hooks/$h"; then
+      echo "skipping the $h hook: there's one already" >&2; continue
+    fi
+    printf '#!/bin/sh\n# Shell-Swapper: copy this checkout into Omarchy after it changes\n"%s/install.sh" --sync >/dev/null 2>&1 &\n' "$here" > "$here/.git/hooks/$h"
+    chmod +x "$here/.git/hooks/$h"
+  done
+  echo "git hooks: copied in after every commit, pull and checkout"
+  exit 0
 fi
-if [[ $(readlink -f "$plugin_dir" 2>/dev/null) == "$here" ]] \
+
+sync_in || true
+if [[ -f $plugin_dir/manifest.json ]] \
    && command -v omarchy-shell >/dev/null && omarchy-shell shell ping >/dev/null 2>&1; then
   omarchy-shell shell rescanPlugins >/dev/null || true
   # discovery is asynchronous: wait (up to 4 s) until the shell knows it
