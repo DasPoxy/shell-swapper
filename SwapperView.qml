@@ -88,6 +88,16 @@ FocusScope {
         out.push({ text: "It goes back into your bindings.lua (line " + p.backToBindings.join(", ") + ").", tone: "add" })
       else if (p.activeNow) out.push({ text: "It stops working now: it's the shell you're using.", tone: "warn" })
     }
+    if (p.diff && p.diff.length) {
+      out.push({ text: "Only these lines change (- before, + after):" })
+      p.diff.slice(2, 42).forEach(function(l) {
+        if (l.indexOf("@@") === 0) return
+        var c = l.charAt(0)
+        out.push({ text: (c === "+" ? "+   " : c === "-" ? "−   " : "    ") + l.slice(1),
+                   tone: c === "+" ? "add" : c === "-" ? "remove" : "code" })
+      })
+      if (p.diff.length > 42) out.push({ text: "…and more", tone: "dim" })
+    }
     if (p.from && p.file && !p.lines) out.push({ text: "Puts " + short(p.file) + " back as it was in " + base(p.from) + "." })
     if (p.backupTo) out.push({ text: "Everything it changes is backed up first, to " + short(p.backupTo) + ".", tone: "dim" })
     return out
@@ -162,10 +172,11 @@ FocusScope {
   }
   function moveMarked() {
     if (!info.keysHook) { setupHook(); return }
-    var lines = Object.keys(marked)
-    if (!lines.length && scanBinds[kcur1]) lines = [String(scanBinds[kcur1].line)]
-    if (!lines.length) return
-    planRun(["keys", "move", keysFor].concat(lines), function(ok) { if (ok) { marked = ({}); say("Moved into " + (keysLoadout ? keysLoadout.name : keysFor)) } })
+    // by key combo, not line number: lines move as bindings.lua is tidied
+    var picks = scanBinds.filter(function(b) { return marked[b.line] }).map(function(b) { return b.keys })
+    if (!picks.length && scanBinds[kcur1]) picks = [scanBinds[kcur1].keys]
+    if (!picks.length) return
+    planRun(["keys", "move", keysFor].concat(picks), function(ok) { if (ok) { marked = ({}); say("Moved into " + (keysLoadout ? keysLoadout.name : keysFor)) } })
   }
   function takeOut() {
     var k = keysLoadout ? keysLoadout.keys[kcur0] : null
@@ -311,6 +322,7 @@ FocusScope {
       else if (k === Qt.Key_M || (kcol === 1 && (k === Qt.Key_Return || k === Qt.Key_Enter))) moveMarked()
       else if (k === Qt.Key_D || (kcol === 0 && (k === Qt.Key_Return || k === Qt.Key_Enter))) { if (kcol === 0) takeOut() }
       else if (k === Qt.Key_U) { if (!info.keysHook) setupHook() }
+      else if (k === Qt.Key_O) planRun(["keys", "organize"], function(ok) { if (ok) say("bindings.lua is tidy.") })
       else if (k === Qt.Key_Escape) { mode = "list"; marked = ({}) }
       else return
       e.accepted = true
@@ -407,7 +419,7 @@ FocusScope {
   Text {
     anchors.right: parent.right
     y: sw.px(5)
-    text: sw.mode === "keys" ? "tab side  ↑↓ pick  space mark  m move in  d take out  esc back"
+    text: sw.mode === "keys" ? "tab side  ↑↓ pick  space mark  m move in  d take out  o tidy  esc back"
       : "↑↓ pick  ⏎ swap  b keys  s save  r rename  d delete  esc close"
     color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10)
   }
@@ -667,7 +679,8 @@ FocusScope {
         width: parent.width
         wrapMode: Text.Wrap
         text: "Keys you move in here only work while this is your shell (and only if you say so when you swap). "
-          + "Everything is backed up first, and nothing changes without asking you."
+          + "In bindings.lua they're gathered under this shell's heading. Nothing changes without asking you, and "
+          + "everything is backed up first (your original bindings.lua is kept for good)."
         color: sw.dim; font.family: sw.font; font.pixelSize: sw.px(11)
       }
       // not set up yet: one line in hyprland.lua loads the loadout keys

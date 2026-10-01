@@ -44,8 +44,11 @@ is only touched when you move keys in or out, and always backed up first):
   keys hook                     add the one line that loads loadout keys
   keys scan                     the binds in your bindings.lua (line numbers)
   keys list ID | keys diff ID   a loadout's keys | what swapping to it changes
-  keys move ID LINE...          move binds from bindings.lua into a loadout
-                                (commented out there, tagged to come back)
+  keys move ID KEYS...          move binds from bindings.lua into a loadout, by key
+                                combo ("SUPER + R") or line number (keys scan);
+                                they're commented out there, tagged, and gathered
+                                under the loadout's heading
+  keys organize                 gather every loadout's tagged keys into its group
   keys remove ID N              take key N out (back to bindings.lua if it came from there)
   keys add ID 'o.bind(...)'     give a loadout a key
   keys backups | keys restore BACKUP
@@ -64,6 +67,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -78,7 +82,15 @@ CONF_DIR = os.path.join(HOME, ".config/shell-swapper")
 LOADOUTS = os.path.join(CONF_DIR, "loadouts")
 CONFIG = os.path.join(CONF_DIR, "config.json")
 STATE = os.path.join(HOME, ".local/state/shell-swapper")
+# backups/original   your files as they were before Shell-Swapper first changed them (kept for good)
+#        /swaps/<t>  a quick copy of shell.json, the keys file and bindings.lua before every swap
+#        /loadouts/<id>/<t>.json   a loadout before every change to it
+#        /keys       every keybind file before Shell-Swapper writes it
 BACKUPS = os.path.join(STATE, "backups")
+ORIGINALS = os.path.join(BACKUPS, "original")
+SWAP_BACKUPS = os.path.join(BACKUPS, "swaps")
+LOADOUT_BACKUPS = os.path.join(BACKUPS, "loadouts")
+KEEP_LOADOUT_BACKUPS = 10
 PENDING = os.path.join(STATE, "pending.json")
 STATUS = os.path.join(STATE, "status.json")
 LAST_GOOD = os.path.join(STATE, "last-good.json")
@@ -298,7 +310,50 @@ def unique_id(name, taken):
 
 def save_loadout(lid, data):
     data = {k: v for k, v in data.items() if k != "id"}
-    write_json(loadout_path(lid), data)
+    path = loadout_path(lid)
+    old = read_json(path, None)
+    if isinstance(old, dict) and old != data:
+        # the loadout as it was, before this change
+        d = os.path.join(LOADOUT_BACKUPS, lid)
+        os.makedirs(d, exist_ok=True)
+        write_json(os.path.join(d, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4] + ".json"), old)
+        for f in sorted(glob.glob(os.path.join(d, "*.json")))[:-KEEP_LOADOUT_BACKUPS]:
+            os.remove(f)
+    write_json(path, data)
+
+
+def keep_original(path):
+    """The first time Shell-Swapper changes one of your files, a copy of it as
+    it was goes to backups/original/, and stays there."""
+    if not os.path.isfile(path):
+        return
+    os.makedirs(ORIGINALS, exist_ok=True)
+    dest = os.path.join(ORIGINALS, os.path.basename(path))
+    if not os.path.exists(dest):
+        with open(path, "rb") as f:
+            data = f.read()
+        with open(dest, "wb") as f:
+            f.write(data)
+    note = os.path.join(ORIGINALS, "README.txt")
+    if not os.path.exists(note):
+        with open(note, "w") as f:
+            f.write("Your files as they were before Shell-Swapper first changed them.\n"
+                    "Shell-Swapper never changes or deletes these.\n")
+
+
+def migrate_backups():
+    """Older layouts: backups/*.json (shell.json before a swap) and
+    keybind-backups/ move into backups/swaps and backups/keys."""
+    for f in glob.glob(os.path.join(BACKUPS, "*.json")):
+        d = os.path.join(SWAP_BACKUPS, os.path.basename(f)[:-5])
+        os.makedirs(d, exist_ok=True)
+        os.replace(f, os.path.join(d, "shell.json"))
+    old = os.path.join(STATE, "keybind-backups")
+    if os.path.isdir(old):
+        os.makedirs(KEY_BACKUPS, exist_ok=True)
+        for f in glob.glob(os.path.join(old, "*")):
+            os.replace(f, os.path.join(KEY_BACKUPS, os.path.basename(f)))
+        os.rmdir(old)
 
 
 def seed():
@@ -407,7 +462,7 @@ HYPR = os.path.join(HOME, ".config/hypr")
 BINDINGS = os.path.join(HYPR, "bindings.lua")
 HYPRLAND = os.path.join(HYPR, "hyprland.lua")
 KEYS_FILE = os.path.join(HYPR, "shell_swapper.lua")
-KEY_BACKUPS = os.path.join(STATE, "keybind-backups")
+KEY_BACKUPS = os.path.join(BACKUPS, "keys")
 LAST_GOOD_KEYS = os.path.join(STATE, "last-good-keys.lua")
 KEEP_KEY_BACKUPS = 40
 HOOK_BEGIN = "-- >>> shell-swapper keys >>>"
@@ -542,6 +597,8 @@ def key_backup(path):
     text = read_text(path)
     if text is None:
         return ""
+    if path != KEYS_FILE:
+        keep_original(path)
     os.makedirs(KEY_BACKUPS, exist_ok=True)
     dest = os.path.join(KEY_BACKUPS, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
                         + "-" + os.path.basename(path))
@@ -653,11 +710,190 @@ def install_hook(yes):
     return dict(plan, installed=True)
 
 
+# ---- keeping bindings.lua tidy: one group per loadout ----
+#
+# Keys moved into a loadout are gathered under that loadout's heading in
+# bindings.lua, a blank line before and after:
+#
+#   -- SlimeS-Bar keys (Shell-Swapper loadout: slimes-bar)
+#   -- Tagged lines belong to that loadout: ...
+#   --[shell-swapper:slimes-bar] o.bind("SUPER + R", ...)
+
+GROUP_RE = re.compile(r"^-- (.*) keys \(Shell-Swapper loadout: ([a-z0-9][a-z0-9-]*)\)\s*$")
+TAG_RE = re.compile(r"^--\[shell-swapper:([a-z0-9][a-z0-9-]*)\] (.*)$")
+OLD_HEAD_RE = re.compile(r"^-- .*(these live in the .* loadout|Shell-Swapper loads them from)")
+HEAD_MORE = ("-- Tagged lines belong to that loadout", "-- hypr/shell_swapper.lua while it's your shell")
+
+
+def group_heading(name, lid):
+    return [f"-- {name} keys (Shell-Swapper loadout: {lid})",
+            "-- Tagged lines belong to that loadout: Shell-Swapper loads them from",
+            "-- hypr/shell_swapper.lua while it's your shell. Untagged lines work in every shell."]
+
+
+def tagged_blocks(lines):
+    """(loadout, start, end) of each tagged statement (end exclusive)."""
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        m = TAG_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        j = i + 1
+        while j < n:
+            m2 = TAG_RE.match(lines[j])
+            if m2 and m2.group(1) == m.group(1) and not classify(m2.group(2)):
+                j += 1
+            else:
+                break
+        out.append((m.group(1), i, j))
+        i = j
+    return out
+
+
+def paragraph_of(lines, i):
+    a = i
+    while a > 0 and lines[a - 1].strip():
+        a -= 1
+    b = i
+    while b < len(lines) and lines[b].strip():
+        b += 1
+    return a, b
+
+
+def organize_text(text, names):
+    """bindings.lua with each loadout's tagged keys gathered into its group.
+    Nothing else moves; blank lines left behind by a move are tidied."""
+    lines = text.split("\n")
+    blocks = tagged_blocks(lines)
+    lids = []
+    for lid, _, _ in blocks:
+        if lid not in lids:
+            lids.append(lid)
+    heads = {}
+    for i, l in enumerate(lines):
+        m = GROUP_RE.match(l)
+        if m:
+            heads.setdefault(m.group(2), i)
+    target, adopt = {}, {}
+    for lid in lids:
+        if lid in heads:
+            target[lid] = paragraph_of(lines, heads[lid])
+            continue
+        first = next(b for b in blocks if b[0] == lid)
+        a, b = paragraph_of(lines, first[1])
+        others = [x for x in blocks if a <= x[1] < b and x[0] != lid]
+        # only a block that's all comments and this loadout's keys becomes its group
+        if not others and all(lines[k].lstrip().startswith("--") and not GROUP_RE.match(lines[k]) for k in range(a, b)):
+            target[lid], adopt[lid] = (a, b), True
+        else:
+            target[lid] = None
+    # a comment between two of a loadout's moving keys goes with them
+    def outside(blk):
+        t = target[blk[0]]
+        return t is None or not (t[0] <= blk[1] < t[1])
+    for k in range(1, len(blocks)):
+        p, q = blocks[k - 1], blocks[k]
+        if p[0] == q[0] and outside(p) and outside(q) and p[2] < q[1] and all(
+                lines[x].lstrip().startswith("--") and not TAG_RE.match(lines[x]) and not GROUP_RE.match(lines[x])
+                for x in range(p[2], q[1])):
+            blocks[k] = (q[0], p[2], q[2])
+    moving = {lid: [] for lid in lids}
+    skip = set()
+    for lid, a, b in blocks:
+        t = target[lid]
+        if t is None or not (t[0] <= a < t[1]):
+            moving[lid].append(lines[a:b])
+            skip.update(range(a, b))
+    # a group left with nothing but its heading goes too
+    for lid, h in heads.items():
+        a, b = paragraph_of(lines, h)
+        body = [k for k in range(a, b) if k not in skip and not GROUP_RE.match(lines[k])
+                and not lines[k].startswith(HEAD_MORE)]
+        if not body and not moving.get(lid):
+            skip.update(range(a, b))
+    starts = {t[0]: lid for lid, t in target.items() if t}
+    ends = {}
+    for lid, t in target.items():
+        if t:
+            ends.setdefault(t[1], []).append(lid)
+    out, removed = [], False
+
+    def emit(l):
+        nonlocal removed
+        if not l.strip():
+            if removed and out and not out[-1].strip():
+                return
+        else:
+            removed = False
+        out.append(l)
+
+    for i, l in enumerate(lines):
+        for lid in ends.get(i, []):
+            for blk in moving[lid]:
+                out.extend(blk)
+        if i in starts and adopt.get(starts[i]):
+            lid = starts[i]
+            out.extend(group_heading(names.get(lid, lid), lid))
+        if i in skip:
+            removed = True
+            continue
+        # an adopted block's old hand-written heading gives way to the standard one
+        if any(t and adopt.get(lid) and t[0] <= i < t[1] for lid, t in target.items()) and OLD_HEAD_RE.match(l):
+            continue
+        m = GROUP_RE.match(l)
+        if m and m.group(2) in names and m.group(1) != names[m.group(2)]:
+            l = group_heading(names[m.group(2)], m.group(2))[0]   # renamed loadout
+        emit(l)
+    for lid in ends.get(len(lines), []):
+        for blk in moving[lid]:
+            out.extend(blk)
+    # loadouts with no group yet: a new one, after the last group (or at the end)
+    new = [lid for lid in lids if target[lid] is None]
+    if new:
+        last = max((i for i, l in enumerate(out) if GROUP_RE.match(l)), default=None)
+        at = paragraph_of(out, last)[1] if last is not None else len(out)
+        while at == len(out) and out and not out[-1].strip():
+            out.pop()
+            at = len(out)
+        chunk = []
+        for lid in new:
+            chunk += [""] + group_heading(names.get(lid, lid), lid) + [l for blk in moving[lid] for l in blk]
+        if at < len(out) and out[at].strip():
+            chunk.append("")
+        out[at:at] = chunk
+    result = "\n".join(out)
+    if text.endswith("\n") and not result.endswith("\n"):
+        result += "\n"
+    return result
+
+
+def organize_keys(yes):
+    with Lock():
+        text = read_text(BINDINGS)
+        if text is None:
+            raise Fail(f"can't read {BINDINGS}")
+        names = {lid: d.get("name", lid) for lid, d in loadouts().items()}
+        new = organize_text(text, names)
+        if new == text:
+            return {"organized": False, "already": True}
+        import difflib
+        diff = list(difflib.unified_diff(text.split("\n"), new.split("\n"), "bindings.lua", "bindings.lua (tidied)", lineterm="", n=1))
+        plan = {"action": "gather each loadout's keys into its own group in bindings.lua",
+                "diff": diff, "keysChange": False, "backupTo": KEY_BACKUPS}
+        if not yes:
+            raise NeedsYes(plan)
+        key_backup(BINDINGS)
+        write_text(BINDINGS, new)
+        hypr_reload()
+        return dict(plan, organized=True)
+
+
 def tag_lines(stmt, lid):
     return "\n".join(MOVED_TAG.format(lid) + l for l in stmt.split("\n"))
 
 
-def move_keys(lid, line_nos, yes):
+def move_keys(lid, picks, yes):
     """Move binds from bindings.lua into loadout `lid`: they're commented out
     there (tagged, so they can come back), with any hl.unbind of the same key."""
     with Lock():
@@ -670,7 +906,13 @@ def move_keys(lid, line_nos, yes):
         if text is None:
             raise Fail(f"can't read {BINDINGS}")
         allb = parse_binds(text)
-        picked = [b for b in allb if b["kind"] == "bind" and b["line"] in line_nos]
+        # picks: key combos ("SUPER + R": they can't go stale) or line numbers
+        lines_ = {int(p) for p in picks if str(p).isdigit()}
+        keys_ = {norm_keys(p) for p in picks if not str(p).isdigit()}
+        picked = [b for b in allb if b["kind"] == "bind" and (b["line"] in lines_ or b["keys"] in keys_)]
+        missing = [p for p in picks if not str(p).isdigit() and norm_keys(p) not in {b["keys"] for b in picked}]
+        if missing:
+            raise Fail("not bound in bindings.lua: " + ", ".join(missing))
         if not picked:
             raise Fail("no binds on those lines of bindings.lua")
         have = {b["keys"] for b in outs[lid].get("keybinds") or []}
@@ -699,7 +941,8 @@ def move_keys(lid, line_nos, yes):
         d["keybinds"] = (d.get("keybinds") or []) + [
             {"keys": b["keys"], "desc": b["desc"], "lua": b["lua"], "from": "bindings.lua"} for b in picked]
         save_loadout(lid, d)
-        write_text(BINDINGS, text)
+        names = {x: y.get("name", x) for x, y in loadouts().items()}
+        write_text(BINDINGS, organize_text(text, names))
         if active and hook_file():
             write_keys(keys_plan(d)["text"])
         hypr_reload()
@@ -742,7 +985,8 @@ def remove_key(lid, idx, yes):
                 while j < len(lines) and lines[j].startswith(tag) and not classify(lines[j][len(tag):]):
                     lines[j] = lines[j][len(tag):]
                     j += 1
-            write_text(BINDINGS, "\n".join(lines))
+            names = {x: y.get("name", x) for x, y in loadouts().items()}
+            write_text(BINDINGS, organize_text("\n".join(lines), names))
         if active and hook_file():
             write_keys(keys_plan(d)["text"])
         if live:
@@ -774,12 +1018,22 @@ def add_key(lid, lua, yes):
         return dict(plan, added=True)
 
 
+def backup_file(name):
+    """A backup by its path under backups/ (original/bindings.lua,
+    swaps/<t>/bindings.lua, keys/<file>), or just a keys/ file's name."""
+    if name == "original":
+        name = "original/bindings.lua"
+    src = os.path.normpath(os.path.join(BACKUPS, name if "/" in name else os.path.join("keys", name)))
+    if os.path.commonpath([src, BACKUPS]) != BACKUPS or not os.path.isfile(src):
+        raise Fail(f"no backup '{name}' (see shell-swapper backups)")
+    return src
+
+
 def restore_key_backup(name, yes):
-    check = os.path.basename(name)
-    src = os.path.join(KEY_BACKUPS, check)
-    if check != name or not os.path.isfile(src):
-        raise Fail(f"no keybind backup '{name}'")
-    target = next((f for f in (BINDINGS, HYPRLAND, KEYS_FILE) if check.endswith("-" + os.path.basename(f))), None)
+    src = backup_file(name)
+    check = os.path.basename(src)
+    target = next((f for f in (BINDINGS, HYPRLAND, KEYS_FILE)
+                   if check == os.path.basename(f) or check.endswith("-" + os.path.basename(f))), None)
     if not target:
         raise Fail("can't tell which file that backup is of")
     plan = {"action": "restore " + os.path.basename(target) + " from a backup", "file": target, "from": src,
@@ -790,6 +1044,42 @@ def restore_key_backup(name, yes):
     write_text(target, read_text(src))
     hypr_reload()
     return dict(plan, restored=True)
+
+
+def backups_listing():
+    def rel(p):
+        return os.path.relpath(p, BACKUPS)
+    return {
+        "dir": BACKUPS,
+        "original": sorted(rel(p) for p in glob.glob(os.path.join(ORIGINALS, "*")) if not p.endswith("README.txt")),
+        "swaps": [{"at": os.path.basename(d), "files": sorted(os.listdir(d))}
+                  for d in sorted(glob.glob(os.path.join(SWAP_BACKUPS, "*")))],
+        "loadouts": {os.path.basename(d): sorted(rel(p) for p in glob.glob(os.path.join(d, "*.json")))
+                     for d in sorted(glob.glob(os.path.join(LOADOUT_BACKUPS, "*")))},
+        "keys": sorted(rel(p) for p in glob.glob(os.path.join(KEY_BACKUPS, "*"))),
+    }
+
+
+def restore_loadout(lid, name, yes):
+    with Lock():
+        outs = loadouts()
+        if check_id(lid) not in outs:
+            raise Fail(f"no loadout '{lid}'")
+        src = os.path.normpath(os.path.join(LOADOUT_BACKUPS, lid, os.path.basename(name)))
+        d = read_json(src, None)
+        if not isinstance(d, dict):
+            raise Fail(f"no backup '{name}' for {lid} (see shell-swapper backups)")
+        active = status().get("active", "") == lid
+        keys_live = active and hook_file() and keys_plan(d)["changes"]
+        plan = {"action": "put " + outs[lid].get("name", lid) + " back as it was in " + os.path.basename(src),
+                "loadout": lid, "keysChange": bool(keys_live), "backupTo": LOADOUT_BACKUPS}
+        if keys_live and not yes:
+            raise NeedsYes(plan)
+        save_loadout(lid, d)
+        if keys_live:
+            write_keys(keys_plan(d)["text"])
+            hypr_reload()
+        return dict(plan, restored=True)
 
 
 # ---- applying ----------------------------------------------------------------
@@ -825,11 +1115,19 @@ def bring_up(mode):
 
 
 def backup(cfg):
-    os.makedirs(BACKUPS, exist_ok=True)
-    path = os.path.join(BACKUPS, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6] + ".json")
+    """A quick copy of everything a swap can change, before it: shell.json,
+    the keys file and your bindings.lua. Returns the shell.json copy."""
+    keep_original(SHELL_JSON)
+    d = os.path.join(SWAP_BACKUPS, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "shell.json")
     write_json(path, cfg)
-    for old in sorted(glob.glob(os.path.join(BACKUPS, "*.json")))[:-KEEP_BACKUPS]:
-        os.remove(old)
+    for f in (KEYS_FILE, BINDINGS):
+        text = read_text(f)
+        if text is not None:
+            write_text(os.path.join(d, os.path.basename(f)), text)
+    for old in sorted(glob.glob(os.path.join(SWAP_BACKUPS, "*")))[:-KEEP_BACKUPS]:
+        shutil.rmtree(old, ignore_errors=True)
     return path
 
 
@@ -891,8 +1189,8 @@ def apply(arg, confirm=True, keys=None):
         if new == cur and not (keys_change and keys == "swap"):
             set_status(active=lid)
             return {"applied": lid, "changed": False}
+        bpath = backup(cur)   # before anything changes: shell.json, keys, bindings.lua
         kinfo = write_keys(kplan["text"]) if keys_change and keys == "swap" else None
-        bpath = backup(cur)
         if not os.path.exists(LAST_GOOD):
             write_json(LAST_GOOD, cur)
         write_json(SHELL_JSON, new)
@@ -994,7 +1292,7 @@ def rescue():
     with Lock():
         good = read_json(LAST_GOOD, None)
         if not isinstance(good, dict):
-            newest = sorted(glob.glob(os.path.join(BACKUPS, "*.json")))
+            newest = sorted(glob.glob(os.path.join(SWAP_BACKUPS, "*", "shell.json")))
             good = read_json(newest[-1], None) if newest else None
         if not isinstance(good, dict):
             raise Fail("nothing to rescue with: no confirmed config or backup yet")
@@ -1059,6 +1357,15 @@ def run(argv):
         print(__doc__.strip())
         return None
     cmd, rest = argv[0], argv[1:]
+    if os.path.isdir(STATE):
+        with Lock():
+            migrate_backups()
+    if cmd == "backups":
+        return backups_listing()
+    if cmd == "loadout-restore":
+        if len(rest) < 2:
+            raise Fail("loadout-restore ID BACKUP (see backups)")
+        return restore_loadout(rest[0], rest[1], "--yes" in rest)
     if cmd == "list":
         return listing()
     if cmd == "suites":
@@ -1204,12 +1511,8 @@ def keys_cmd(rest):
         return {k: plan[k] for k in ("changes", "add", "remove", "conflicts")}
     if sub == "move":
         if len(args) < 3:
-            raise Fail("keys move ID LINE [LINE...]")
-        try:
-            nums = [int(a) for a in args[2:]]
-        except ValueError:
-            raise Fail("lines are numbers (see keys scan)")
-        return move_keys(args[1], nums, yes)
+            raise Fail('keys move ID "SUPER + R" ... (key combos, or line numbers from keys scan)')
+        return move_keys(args[1], args[2:], yes)
     if sub == "remove":
         if len(args) < 3 or not args[2].isdigit():
             raise Fail("keys remove ID N")
@@ -1218,8 +1521,10 @@ def keys_cmd(rest):
         if len(args) < 3:
             raise Fail("keys add ID 'o.bind(\"KEYS\", \"what\", \"command\")'")
         return add_key(args[1], " ".join(args[2:]), yes)
+    if sub == "organize":
+        return organize_keys(yes)
     if sub == "backups":
-        return {"dir": KEY_BACKUPS, "backups": sorted(os.path.basename(p) for p in glob.glob(os.path.join(KEY_BACKUPS, "*")))}
+        return backups_listing()
     if sub == "restore":
         if len(args) < 2:
             raise Fail("keys restore BACKUP")

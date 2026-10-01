@@ -29,9 +29,17 @@ reverts itself unless you keep it.
   shell you kept and restarts, even when the bar won't start.
 - **Keys per shell.** A loadout can carry its own keybinds (Slime's launcher
   on SUPER+R, Ruixen's on SUPER+X...). See [Keys](#keys).
-- **Backups.** `shell.json` is backed up before every swap (the last 20, in
-  `~/.local/state/shell-swapper/backups/`), and swaps never run while the
-  screen is locked.
+- **Backups**, in `~/.local/state/shell-swapper/backups/`:
+  - `original/`: your `bindings.lua`, `hyprland.lua` and `shell.json` as they
+    were before Shell-Swapper first changed them. Kept for good, never
+    touched again.
+  - `swaps/<time>/`: a quick copy of `shell.json`, `bindings.lua` and the
+    loadout keys file before every swap (the last 20).
+  - `loadouts/<loadout>/`: each loadout as it was before every change to it
+    (the last 10 of each).
+  - `keys/`: every keybind file before Shell-Swapper writes it (the last 40).
+
+  Swaps never run while the screen is locked.
 
 On first run it saves the shell you're using as a loadout. If Slime Shell's
 `slime-shell use` has a backup of the bar it replaced, that's imported as a
@@ -86,8 +94,24 @@ the file goes away). Swapping writes that file, never your `bindings.lua`.
   the keys back too.
 - **Moving keys in** (b, then pick keys from your `bindings.lua` with space
   and press m): they're commented out in `bindings.lua`, tagged with the
-  loadout, not deleted, along with any `hl.unbind` of the same key. Taking a
-  key out of the loadout (d) un-comments it again, exactly as it was.
+  loadout, not deleted, along with any `hl.unbind` of the same key (and a
+  comment sitting between two of them). Taking a key out of the loadout (d)
+  un-comments it again, exactly as it was.
+- **Tidy groups.** Each loadout's keys are gathered in one group in
+  `bindings.lua`, under a heading, with a blank line before and after:
+
+  ```lua
+  -- SlimeS-Bar keys (Shell-Swapper loadout: slimes-bar)
+  -- Tagged lines belong to that loadout: Shell-Swapper loads them from
+  -- hypr/shell_swapper.lua while it's your shell. Untagged lines work in every shell.
+  --[shell-swapper:slimes-bar] hl.unbind("SUPER + R")
+  --[shell-swapper:slimes-bar] o.bind("SUPER + R", "Slime launcher", "omarchy-shell slime-launcher apps")
+  ```
+
+  A block of yours that's only comments and one loadout's keys becomes its
+  group in place; otherwise the group is added after the others (or at the
+  end). Nothing else in the file moves. `o` in the keys manager (or `keys
+  organize`) tidies a file that's drifted, showing the diff first.
 - **No double keys.** A loadout key that your `bindings.lua` binds too would
   fire both, so it's left out (and shown in red) until you sort it out.
 - Each loadout key is written with an `hl.unbind` before it, so it replaces
@@ -115,10 +139,14 @@ shell-swapper rescue
 shell-swapper apply ruixen-bar --keys        # or --keep-keys
 shell-swapper keys status | hook | scan      # the hook, your bindings.lua's binds
 shell-swapper keys list ID | diff ID
-shell-swapper keys move ID LINE...           # from bindings.lua into a loadout
+shell-swapper keys move ID "SUPER + R" ...   # from bindings.lua into a loadout
 shell-swapper keys remove ID N               # out again (back to bindings.lua)
 shell-swapper keys add ID 'o.bind("SUPER + R", "Launcher", "my-launcher")'
-shell-swapper keys backups | restore BACKUP
+shell-swapper keys organize                  # gather each loadout's keys into its group
+shell-swapper backups                        # everything kept, by kind
+shell-swapper keys restore original          # your bindings.lua from before Shell-Swapper
+shell-swapper keys restore swaps/<time>/bindings.lua
+shell-swapper loadout-restore ID FILE        # a loadout as it was (see backups)
 ```
 
 ## For suite authors
