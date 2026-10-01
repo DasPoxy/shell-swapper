@@ -966,9 +966,12 @@ def remove_key(lid, idx, yes):
         back = [i for i, l in enumerate(text.split("\n"))
                 if l.startswith(tag) and (classify(l[len(tag):]) or {}).get("keys") == b["keys"]]
         active = status().get("active", "") == lid
+        imported = b.get("from") == "import"
         plan = {"action": "take " + b["keys"] + " out of " + d.get("name", lid), "loadout": lid,
                 "keys": b["keys"], "desc": b.get("desc", ""),
-                "backToBindings": [i + 1 for i in back], "activeNow": active, "backupTo": KEY_BACKUPS}
+                "backToBindings": [] if imported else [i + 1 for i in back],
+                "dropFromBindings": [i + 1 for i in back] if imported else [],
+                "activeNow": active, "backupTo": KEY_BACKUPS}
         live = active or back
         if live and not yes:
             raise NeedsYes(plan)
@@ -977,14 +980,21 @@ def remove_key(lid, idx, yes):
         if back:
             key_backup(BINDINGS)
             lines = text.split("\n")
+            drop = set()
             for i in back:
                 # the statement's first line, then the rest of it (tagged
                 # lines that don't start a statement of their own)
-                lines[i] = lines[i][len(tag):]
+                span = [i]
                 j = i + 1
                 while j < len(lines) and lines[j].startswith(tag) and not classify(lines[j][len(tag):]):
-                    lines[j] = lines[j][len(tag):]
+                    span.append(j)
                     j += 1
+                for x in span:
+                    if imported:
+                        drop.add(x)   # Shell-Swapper added it: it goes (backed up), not into every shell
+                    else:
+                        lines[x] = lines[x][len(tag):]
+            lines = [l for x, l in enumerate(lines) if x not in drop]
             names = {x: y.get("name", x) for x, y in loadouts().items()}
             write_text(BINDINGS, organize_text("\n".join(lines), names))
         if active and hook_file():
@@ -1368,6 +1378,227 @@ def save_template(name, keys, category, binds):
         ts.append({"name": name, "keys": norm_keys(keys), "category": category, "binds": binds, "saved": now()})
         write_json(TEMPLATES, ts)
         return {"saved": name}
+
+
+# ---- importing a shell's recommended keys -----------------------------------
+#
+# Paste binds from a shell's repo (its README, docs, an install script) and
+# they become that loadout's keys, in its group in bindings.lua too. Both
+# styles: Omarchy's Lua (o.bind / hl.bind) and Hyprland's (bind = MODS, KEY,
+# exec, command; bindd with a description). `keys find` looks through the
+# shell's own checkout for them, keeping only binds that call that shell.
+
+HYPR_BIND_RE = re.compile(r"^\s*bind([a-z]*)\s*=\s*(.+)$")
+
+
+def hypr_conf_bind(line):
+    """'bind = SUPER SHIFT, R, exec, cmd' -> (keys, desc, command) or a reason."""
+    m = HYPR_BIND_RE.match(line)
+    if not m:
+        return None
+    flags, rest = m.group(1), m.group(2)
+    parts = [p.strip() for p in rest.split(",")]
+    has_desc = "d" in flags
+    need = 5 if has_desc else 4
+    if len(parts) < need - 1:
+        return "not a whole bind line"
+    mods, key = parts[0], parts[1]
+    desc = parts[2] if has_desc else ""
+    disp = parts[3 if has_desc else 2].lower()
+    arg = ",".join(parts[4 if has_desc else 3:]).strip()
+    if disp != "exec":
+        return f"only exec binds can come in (this one is '{disp}')"
+    mm = [x for x in re.split(r"[\s_+]+", mods) if x]
+    mm = ["SUPER" if x.lower() in ("$mainmod", "$mod", "super", "mod4", "win") else x for x in mm]
+    keys = norm_keys(" + ".join(mm + [key]))
+    return (keys, desc or arg, arg)
+
+
+def parse_import(text):
+    """Pasted text -> binds found, and the lines that weren't."""
+    found, skipped, lua_lines = [], [], []
+    for raw in text.replace("\r", "").split("\n"):
+        line = re.sub(r"^\s*(//+|\*)\s?", "", raw)            # recipes inside code comments
+        if HYPR_BIND_RE.match(line):
+            r = hypr_conf_bind(line)
+            if isinstance(r, tuple):
+                k, d, c = r
+                found.append({"keys": k, "desc": d, "command": c, "lua": bind_lua(k, d, c), "from": line.strip()})
+            else:
+                skipped.append({"line": line.strip(), "why": r})
+            lua_lines.append("")
+            continue
+        lua_lines.append(line)
+    lua = "\n".join(lua_lines)
+    # every o.bind( / hl.bind( call, wherever it sits (a recipe in prose too)
+    spans = []
+    for m in re.finditer(r"\b(o\.bind_toggle|o\.bind|hl\.bind)\s*\(", lua):
+        i, depth, q = m.end(), 1, None
+        while i < len(lua) and depth:
+            c = lua[i]
+            if q:
+                if c == "\\":
+                    i += 1
+                elif c == q:
+                    q = None
+            elif c in "\"'":
+                q = c
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            i += 1
+        if depth:
+            continue
+        stmt = lua[m.start():i]
+        info = classify(stmt)
+        if not info or info["kind"] != "bind" or not info["keys"]:
+            continue
+        one = re.sub(r"\s*\n\s*", " ", stmt)        # one line, as it'll be written
+        found.append({"keys": info["keys"], "desc": info["desc"], "command": bind_command(one), "lua": one,
+                      "from": stmt.split("\n")[0][:120]})
+        spans.append((m.start(), i))
+    # lines with something on them that wasn't a bind (for the preview)
+    for st, en in lua_statements(lua):
+        if any(a <= st < b or st <= a < en for a, b in spans):
+            continue
+        stmt = lua[st:en].strip()
+        info = classify(stmt)
+        if info and info["kind"] == "unbind":
+            continue   # Shell-Swapper writes its own hl.unbind before each key
+        if stmt and not stmt.startswith(("--", "#", "```")) and len(skipped) < 40:
+            skipped.append({"line": stmt.split("\n")[0][:120], "why": "not a bind"})
+    return found, skipped
+
+
+def import_plan(lid, text):
+    outs = loadouts()
+    if check_id(lid) not in outs:
+        raise Fail(f"no loadout '{lid}'")
+    d = outs[lid]
+    have = d.get("keybinds") or []
+    mine = {b["keys"]: b["line"] for b in user_binds()}
+    found, skipped = parse_import(text)
+    rows, seen = [], set()
+    for f in found:
+        if f["keys"] in seen:
+            f["status"], f["why"] = "skip", "this key is in the paste twice: the first one wins"
+            rows.append(f)
+            continue
+        seen.add(f["keys"])
+        same = [b for b in have if b["keys"] == f["keys"]]
+        other = [b for b in have if b["keys"] != f["keys"] and f["command"] and bind_command(b["lua"]) == f["command"]]
+        if same and bind_command(same[0]["lua"]) == f["command"]:
+            f["status"], f["why"] = "already", "this shell already has it"
+        elif other:
+            f["status"], f["why"] = "skip", "this shell already does that on " + other[0]["keys"]
+        elif same:
+            f["status"], f["why"] = "replace", "replaces its " + same[0]["keys"] + " (" + same[0].get("desc", "") + ")"
+        else:
+            f["status"], f["why"] = "new", ""
+        if f["status"] in ("new", "replace") and f["keys"] in mine:
+            f["clashLine"] = mine[f["keys"]]
+            f["why"] = (f["why"] + "; " if f["why"] else "") + \
+                f"your bindings.lua binds it too (line {mine[f['keys']]}): left out until that's sorted"
+        rows.append(f)
+    return {"action": "import keys into " + d.get("name", lid), "loadout": lid, "loadoutName": d.get("name", lid),
+            "import": [{k: r.get(k, "") for k in ("keys", "desc", "command", "status", "why", "from", "clashLine")}
+                       for r in rows],
+            "skipped": skipped, "activeNow": status().get("active", "") == lid, "backupTo": KEY_BACKUPS}
+
+
+def import_keys(lid, text, yes):
+    with Lock():
+        plan = import_plan(lid, text)
+        take = [r for r in plan["import"] if r["status"] in ("new", "replace")]
+        if not take:
+            return dict(plan, nothing=True)
+        if not yes:
+            raise NeedsYes(plan)
+        outs = loadouts()
+        d = outs[lid]
+        found = {}
+        for f in parse_import(text)[0]:
+            found.setdefault(f["keys"], f)   # the first of a key in the paste wins, as the preview says
+        keys = {r["keys"] for r in take}
+        replaced = [b for b in d.get("keybinds") or [] if b["keys"] in keys]
+        d["keybinds"] = [b for b in d.get("keybinds") or [] if b["keys"] not in keys] + [
+            {"keys": r["keys"], "desc": r["desc"], "lua": found[r["keys"]]["lua"], "from": "import"} for r in take]
+        save_loadout(lid, d)
+        # bindings.lua: the new keys, tagged, into the shell's group; a key
+        # they replace keeps its line, marked as replaced (never deleted)
+        btext = read_text(BINDINGS) or ""
+        key_backup(BINDINGS)
+        tag = MOVED_TAG.format(lid)
+        lines = btext.split("\n")
+        for i, l in enumerate(lines):
+            if l.startswith(tag) and (classify(l[len(tag):]) or {}).get("keys") in {b["keys"] for b in replaced}:
+                lines[i] = f"--[shell-swapper:{lid}:replaced] " + l[len(tag):]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines += [""] + [tag_lines(found[r["keys"]]["lua"], lid) for r in take] + [""]
+        names = {x: y.get("name", x) for x, y in loadouts().items()}
+        write_text(BINDINGS, organize_text("\n".join(lines), names))
+        if plan["activeNow"] and hook_file():
+            write_keys(keys_plan(d)["text"])
+        hypr_reload()
+        return dict(plan, imported=len(take))
+
+
+def shell_targets(sid, all_suites):
+    """What a shell's commands look like: its plugin ids and IPC targets."""
+    marks = set()
+    for pid, info in suite_plugins(sid, all_suites).items():
+        marks.add(pid)
+        for q in glob.glob(os.path.join(info["dir"], "**", "*.qml"), recursive=True):
+            for a in scan_ipc(q):
+                if not a["target"].startswith("omarchy."):
+                    marks.add(a["target"])
+    return marks
+
+
+def find_keys(lid):
+    """Binds a shell recommends, from its own checkout: READMEs, docs,
+    scripts and code comments; only ones that call that shell."""
+    all_suites, outs = suites(), loadouts()
+    d = outs.get(check_id(lid))
+    if d is None:
+        raise Fail(f"no loadout '{lid}'")
+    sid = d.get("suite", "")
+    marks = shell_targets(sid, all_suites)
+    roots = set()
+    for pid, info in suite_plugins(sid, all_suites).items():
+        top = subprocess.run(["git", "-C", info["dir"], "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        root = top.stdout.strip() if top.returncode == 0 else ""
+        # a repo holding the plugins folder itself (~/.config/omarchy under
+        # git, say) isn't this shell's: just its own plugin folders then
+        plugins_home = os.path.realpath(PLUGIN_DIRS[0])
+        if not root or plugins_home == root or plugins_home.startswith(root + os.sep):
+            root = info["dir"]
+        roots.add(root)
+    found, files = [], []
+    for root in sorted(roots):
+        for pat in ("**/*.md", "**/*.lua", "**/*.conf", "**/*.sh", "**/*.qml", "**/*.js", "**/*.txt"):
+            for f in glob.glob(os.path.join(root, pat), recursive=True):
+                if "/node_modules/" in f or "/.git/" in f:
+                    continue
+                text = read_text(f) or ""
+                if "bind" not in text:
+                    continue
+                for b in parse_import(text)[0]:
+                    if any(m in b["command"] for m in marks):
+                        b["file"] = os.path.relpath(f, root)
+                        found.append(b)
+                        if f not in files:
+                            files.append(f)
+    seen, uniq = set(), []
+    for b in found:
+        k = (b["keys"], b["command"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(b)
+    return {"loadout": lid, "suite": sid, "roots": sorted(roots), "files": files,
+            "binds": uniq, "text": "\n".join(b["lua"] for b in uniq)}
 
 
 def backup_file(name):
@@ -1915,6 +2146,23 @@ def keys_cmd(rest):
             ts = [t for t in templates() if t.get("name") != (args[1] if len(args) > 1 else "")]
             write_json(TEMPLATES, ts)
         return {"templates": ts}
+    if sub == "find":
+        if len(args) < 2:
+            raise Fail("keys find ID")
+        return find_keys(args[1])
+    if sub == "import":
+        if len(args) < 2:
+            raise Fail("keys import ID --text TEXT (or the text on stdin)")
+        text = None
+        if "--text" in rest:
+            k = rest.index("--text")
+            text = rest[k + 1] if k + 1 < len(rest) else ""
+        if text is None:
+            text = sys.stdin.read()
+        if "--check" in rest:
+            with Lock():
+                return import_plan(args[1], text)
+        return import_keys(args[1], text, yes)
     if sub == "organize":
         return organize_keys(yes)
     if sub == "backups":

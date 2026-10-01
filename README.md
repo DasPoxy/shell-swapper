@@ -98,6 +98,19 @@ hot-reloads `shell.json`, no restart flash), and the keep-it timer.
   off), then see the full plan before anything is set. It's kept as a
   template (**3 Templates**).
 - **2 From bindings.lua.** Move keys you already have into the shell (below).
+- **4 Import.** Paste the binds a shell's repo recommends (its README, docs,
+  install notes), in Omarchy's style (`o.bind("SUPER + R", "Launcher",
+  "omarchy-shell ...")`) or Hyprland's (`bind = SUPER ALT, C, exec, ...`,
+  `bindd` with a description). **f** looks through the shell's own checkout
+  for you: READMEs, docs, scripts and recipes in code comments, keeping only
+  binds that call that shell. On the right you see what each line became:
+  new, replacing one of its keys, already there, or left out (and why: a
+  non-exec Hyprland bind, the same key twice, a call it already has on
+  another key, prose). **i** imports them, after showing the plan: into the
+  shell's loadout and, tagged, into its group in `bindings.lua`. A key they
+  replace keeps its line there, marked `--[shell-swapper:<id>:replaced]`;
+  taking an imported key out again removes the line Shell-Swapper added
+  (it never came from your file, so it isn't handed to every shell).
 
 ## Keys
 
@@ -171,6 +184,9 @@ shell-swapper keys set ID "SUPER + ALT + C" "Dashboard" "omarchy-shell ruixen.no
 shell-swapper keys set-many '[{"loadout": ..., "keys": ..., "desc": ..., "command": ...}]'
 shell-swapper keys propose ID "SUPER + ALT + C" "omarchy-shell slime-shell toggleTab home"
 shell-swapper keys templates | template-save NAME JSON | template-delete NAME
+shell-swapper keys find ID                   # binds the shell's own files recommend
+shell-swapper keys import ID --check < binds.txt   # what a paste would become
+shell-swapper keys import ID --text '...'    # import (plan first; --yes to do it)
 shell-swapper backups                        # everything kept, by kind
 shell-swapper keys restore original          # your bindings.lua from before Shell-Swapper
 shell-swapper keys restore swaps/<time>/bindings.lua

@@ -88,6 +88,19 @@ FocusScope {
         out.push({ text: "It goes back into your bindings.lua (line " + p.backToBindings.join(", ") + ").", tone: "add" })
       else if (p.activeNow) out.push({ text: "It stops working now: it's the shell you're using.", tone: "warn" })
     }
+    if (p["import"]) {
+      var take = p["import"].filter(function(r) { return r.status === "new" || r.status === "replace" })
+      out.push({ text: "Adds " + take.length + " key" + (take.length === 1 ? "" : "s") + " to " + (p.loadoutName || p.loadout) + ":" })
+      take.forEach(function(r) {
+        out.push({ text: (r.status === "replace" ? "↻  " : "+  ") + r.keys + "   " + r.desc, tone: "add" })
+        if (r.why) out.push({ text: r.why, tone: r.clashLine ? "warn" : "dim" })
+      })
+      var left = p["import"].length - take.length
+      if (left) out.push({ text: left + " left out (already there, or the same key twice).", tone: "dim" })
+      out.push({ text: "They go into this shell's loadout and, tagged, into its group in bindings.lua. "
+        + "A key they replace keeps its line there, marked as replaced.", tone: "dim" })
+      out.push({ text: p.activeNow ? "It's the shell you're using: they work now." : "They work when you swap to it (and bring its keys).", tone: "dim" })
+    }
     if (p.set) {
       ;(p.unchanged || []).forEach(function(x) { out.push({ text: x.loadoutName + " already has " + x.keys + " for that: left as it is.", tone: "dim" }) })
       out.push({ text: p.set.length > 1 ? "Sets these keys:" : "Sets this key:" })
@@ -178,6 +191,7 @@ FocusScope {
     kcol = sel.l.keys.length ? 0 : 1
     btab = tab || "actions"
     acur = 0; filter = ""; capturing = false; review = null
+    if (keysFor !== importFor) { importText = ""; importFound = ""; importCheck = null; importFor = keysFor }
     refreshScan(); refreshActions(); refreshTemplates()
   }
 
@@ -352,6 +366,27 @@ FocusScope {
     })
   }
   function refreshTemplates() { if (!tmplProc.running) tmplProc.running = true }
+
+  // ---- import: binds pasted from the shell's repo ----
+  property string importText: ""
+  property string importFor: ""
+  property var importCheck: null        // the plan --check returns: rows + skipped lines
+  property string importFound: ""       // where "find in its repo" looked
+  onImportTextChanged: importTimer.restart()
+  Timer { id: importTimer; interval: 350; onTriggered: sw.checkImport() }
+  function checkImport() {
+    if (!keysFor || !importText.trim()) { importCheck = null; return }
+    importCheckProc.command = ["python3", script, "keys", "import", keysFor, "--check", "--text", importText]
+    importCheckProc.running = true
+  }
+  readonly property int importCount: importCheck ? importCheck["import"].filter(function(r) { return r.status === "new" || r.status === "replace" }).length : 0
+  function findInRepo() { if (keysFor && !findProc.running) { findProc.command = ["python3", script, "keys", "find", keysFor]; findProc.running = true } }
+  function doImport() {
+    if (!importCount) { say(importText.trim() ? "Nothing new to import." : "Paste some binds first (or f: find them in its repo).", true); return }
+    planRun(["keys", "import", keysFor, "--text", importText], function(ok) {
+      if (ok) { say("Imported into " + (keysLoadout ? keysLoadout.name : keysFor) + "."); importText = ""; importCheck = null; refreshActions() }
+    })
+  }
   function refreshScan() { if (!scanProc.running) scanProc.running = true }
   function toggleMark() {
     var b = scanBinds[kcur1]
@@ -502,6 +537,24 @@ FocusScope {
     stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
   }
   Process {
+    id: importCheckProc
+    stdout: StdioCollector { onStreamFinished: { try { sw.importCheck = JSON.parse(text) } catch (e) { sw.importCheck = null } } }
+    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
+  }
+  Process {
+    id: findProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var r = null
+        try { r = JSON.parse(text) } catch (e) { return }
+        sw.importFound = (r.files || []).length ? (r.binds.length + " found in " + r.files.map(function(f) { return f.split("/").pop() }).join(", "))
+                                                 : "none found in its plugins (" + (r.roots || []).length + " folder" + ((r.roots || []).length === 1 ? "" : "s") + " looked through)"
+        if (r.text) sw.importText = (sw.importText.trim() ? sw.importText.trim() + "\n" : "") + r.text
+      }
+    }
+    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
+  }
+  Process {
     id: tmplProc
     command: ["python3", sw.script, "keys", "templates"]
     stdout: StdioCollector { onStreamFinished: { try { sw.tmpls = JSON.parse(text).templates || [] } catch (e) {} } }
@@ -560,8 +613,8 @@ FocusScope {
       e.accepted = true
       return
     }
-    if (mode === "keys" && (k === Qt.Key_1 || k === Qt.Key_2 || k === Qt.Key_3)) {
-      btab = k === Qt.Key_1 ? "actions" : k === Qt.Key_2 ? "file" : "templates"
+    if (mode === "keys" && (k === Qt.Key_1 || k === Qt.Key_2 || k === Qt.Key_3 || k === Qt.Key_4)) {
+      btab = k === Qt.Key_1 ? "actions" : k === Qt.Key_2 ? "file" : k === Qt.Key_3 ? "templates" : "import"
       e.accepted = true
       return
     }
@@ -574,6 +627,15 @@ FocusScope {
       else if (k === Qt.Key_T) startTemplate()
       else if (k === Qt.Key_Slash) { filterInput.forceActiveFocus() }
       else if (k === Qt.Key_Escape) { if (filter) filter = ""; else mode = "list" }
+      else return
+      e.accepted = true
+      return
+    }
+    if (mode === "keys" && btab === "import") {
+      if (k === Qt.Key_F) findInRepo()
+      else if (k === Qt.Key_I) doImport()
+      else if (k === Qt.Key_E || k === Qt.Key_Return || k === Qt.Key_Enter) importEdit.forceActiveFocus()
+      else if (k === Qt.Key_Escape) mode = "list"
       else return
       e.accepted = true
       return
@@ -694,9 +756,10 @@ FocusScope {
   Text {
     anchors.right: parent.right
     y: sw.px(5)
-    text: sw.mode === "keys" ? (sw.btab === "actions" ? "1 2 3 tabs  ↑↓ pick  / search  c key  ⏎ set  x clear  t other shells  esc back"
-        : sw.btab === "templates" ? "1 2 3 tabs  ↑↓ pick  d forget  esc back"
-        : "1 2 3 tabs  tab side  ↑↓ pick  space mark  m move in  d take out  o tidy  esc back")
+    text: sw.mode === "keys" ? (sw.btab === "actions" ? "1-4 tabs  ↑↓ pick  / search  c key  ⏎ set  x clear  t other shells  esc back"
+        : sw.btab === "templates" ? "1-4 tabs  ↑↓ pick  d forget  esc back"
+        : sw.btab === "import" ? "1-4 tabs  e paste box  f find in its repo  i import  esc back"
+        : "1-4 tabs  tab side  ↑↓ pick  space mark  m move in  d take out  o tidy  esc back")
           : "↑↓ pick  ⏎ swap  k keybinds  s save  r rename  d delete  esc close"
     color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10)
   }
@@ -956,7 +1019,7 @@ FocusScope {
           color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(15); font.bold: true
         }
         Repeater {
-          model: [["actions", "1", "Its actions"], ["file", "2", "From bindings.lua"], ["templates", "3", "Templates"]]
+          model: [["actions", "1", "Its actions"], ["file", "2", "From bindings.lua"], ["templates", "3", "Templates"], ["import", "4", "Import"]]
           Btn {
             required property var modelData
             text: modelData[2]; hint: modelData[1]
@@ -973,6 +1036,9 @@ FocusScope {
             + "for the similar call in your other shells: you review each one before anything is set."
           : sw.btab === "templates"
           ? "Keys you've set across shells at once. Each shell keeps its own call; d forgets a template (the keys stay)."
+          : sw.btab === "import"
+          ? "Paste binds from this shell's repo (its README, docs, install notes): Omarchy's o.bind(...) lines or Hyprland's "
+            + "bind = MODS, KEY, exec, command. f looks through its own files for you. Check what's understood on the right, then i to import."
           : "Keys you move in here only work while this is your shell (and only if you say so when you swap). "
             + "In bindings.lua they're gathered under this shell's heading. Nothing changes without asking you, and "
             + "everything is backed up first (your original bindings.lua is kept for good)."
@@ -1151,6 +1217,119 @@ FocusScope {
           Btn { text: sw.act && sw.act.bound ? "Change key" : "Set key"; hint: "Enter"; on: true; onClicked: sw.setKey() }
           Btn { visible: !!sw.act && !!sw.act.bound; text: "Clear key"; hint: "x"; onClicked: sw.clearKey() }
           Btn { text: "Same key in other shells…"; hint: "t"; onClicked: sw.startTemplate() }
+        }
+      }
+    }
+
+    // ---- tab 4: import ----
+    Item {
+      visible: sw.btab === "import"
+      anchors { top: keysHead.bottom; topMargin: 12; bottom: parent.bottom; left: parent.left; right: parent.right }
+      Column {
+        id: impLeft
+        width: Math.round(parent.width * 0.5)
+        height: parent.height
+        spacing: 6
+        Row {
+          spacing: 6
+          Btn { text: "Find in its repo"; hint: "f"; onClicked: sw.findInRepo() }
+          Btn { text: "Clear"; onClicked: { sw.importText = ""; sw.importFound = "" } }
+          Text { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: sw.importFound; color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10) }
+        }
+        Rectangle {
+          width: parent.width
+          height: parent.height - y - impBtn.height - 6
+          radius: sw.rad
+          color: sw.rowFill
+          border.color: importEdit.activeFocus ? sw.accent : sw.line
+          Flickable {
+            id: impFlick
+            anchors.fill: parent
+            anchors.margins: 8
+            clip: true
+            contentWidth: width
+            contentHeight: importEdit.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
+            TextEdit {
+              id: importEdit
+              width: impFlick.width
+              text: sw.importText
+              onTextChanged: if (text !== sw.importText) sw.importText = text
+              wrapMode: TextEdit.WrapAnywhere
+              selectByMouse: true
+              persistentSelection: true
+              color: sw.fg
+              selectionColor: sw.tint(sw.accent, 0.4)
+              selectedTextColor: sw.fg
+              font.family: sw.font
+              font.pixelSize: sw.px(11)
+              Keys.onEscapePressed: sw.takeKeys()
+              Text {
+                visible: !importEdit.text && !importEdit.activeFocus
+                text: "Paste binds here (Ctrl+V), e.g.\n\no.bind(\"SUPER + R\", \"Launcher\", \"omarchy-shell my-shell launcher\")\nbind = SUPER ALT, C, exec, omarchy-shell my-shell dashboard"
+                color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(11)
+              }
+            }
+          }
+          MouseArea { anchors.fill: parent; acceptedButtons: Qt.NoButton; cursorShape: Qt.IBeamCursor }
+        }
+        Btn {
+          id: impBtn
+          text: sw.importCount ? "Import " + sw.importCount + " key" + (sw.importCount === 1 ? "" : "s") : "Import"
+          hint: "i"; on: sw.importCount > 0
+          onClicked: sw.doImport()
+        }
+      }
+      // what was understood
+      Column {
+        anchors { left: impLeft.right; leftMargin: 18; right: parent.right }
+        height: parent.height
+        spacing: 5
+        Heading { text: "WHAT IT FOUND" }
+        Text {
+          visible: !sw.importCheck || sw.importCheck["import"].length === 0
+          width: parent.width; wrapMode: Text.Wrap
+          text: sw.importText.trim() ? "No binds in that yet." : "Nothing pasted yet."
+          color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(11)
+        }
+        ListView {
+          width: parent.width
+          height: Math.min(contentHeight, parent.height * 0.62)
+          clip: true
+          spacing: 4
+          model: sw.importCheck ? sw.importCheck["import"] : []
+          delegate: Rectangle {
+            id: irow
+            required property var modelData
+            readonly property bool taken: modelData.status === "new" || modelData.status === "replace"
+            width: ListView.view.width
+            height: icol.implicitHeight + 10
+            radius: sw.rad
+            color: sw.rowFill
+            Column {
+              id: icol
+              x: 10; y: 5; width: parent.width - 20
+              Text {
+                width: parent.width; elide: Text.ElideRight; textFormat: Text.PlainText
+                text: (irow.modelData.status === "new" ? "+  " : irow.modelData.status === "replace" ? "↻  " : irow.modelData.status === "already" ? "=  " : "×  ")
+                  + irow.modelData.keys + "   " + irow.modelData.desc
+                color: irow.taken ? (irow.modelData.clashLine ? sw.urgent : sw.accent) : sw.faint
+                font.family: sw.font; font.pixelSize: sw.px(11)
+              }
+              Text { visible: !!irow.modelData.why; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; text: irow.modelData.why; color: irow.modelData.clashLine ? sw.urgent : sw.faint; font.family: sw.font; font.pixelSize: sw.px(10) }
+              Text { width: parent.width; elide: Text.ElideRight; textFormat: Text.PlainText; text: irow.modelData.command; color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(9) }
+            }
+          }
+        }
+        Heading { visible: !!sw.importCheck && sw.importCheck.skipped.length > 0; text: "NOT BINDS (LEFT OUT)" }
+        Repeater {
+          model: sw.importCheck ? sw.importCheck.skipped.slice(0, 6) : []
+          Text {
+            required property var modelData
+            width: parent.width; elide: Text.ElideRight; textFormat: Text.PlainText
+            text: modelData.line + "   (" + modelData.why + ")"
+            color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10)
+          }
         }
       }
     }
