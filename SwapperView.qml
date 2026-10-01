@@ -1349,6 +1349,8 @@ FocusScope {
         clip: true
         spacing: 6
         model: sw.tmpls
+        currentIndex: sw.tcur
+        onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
         delegate: Rectangle {
           id: trow
           required property var modelData
@@ -1401,6 +1403,10 @@ FocusScope {
           clip: true
           spacing: 4
           model: sw.keysLoadout ? sw.keysLoadout.keys : []
+          objectName: "shellKeysList"
+          // follow the keyboard cursor
+          currentIndex: sw.kcur0
+          onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
           delegate: KeyRow {
             required property var modelData
             required property int index
