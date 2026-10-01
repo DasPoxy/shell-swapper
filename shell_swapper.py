@@ -253,7 +253,7 @@ def default_bar(suite_id, all_suites):
         b = (read_json(DEFAULTS_JSON, {}) or {}).get("bar")
         if isinstance(b, dict):
             return b
-    return {"id": suite_id}
+    return None   # no layout known (a bar with nothing on it is no default)
 
 
 # ---- loadouts ---------------------------------------------------------------
@@ -1719,14 +1719,35 @@ def pending():
     return p if isinstance(p, dict) and p.get("token") else None
 
 
+def fresh_loadout(sid, all_suites):
+    """A new loadout for a suite. If its bar is the one in shell.json now
+    (its own installer set it up), that's it: its layout, its own plugins,
+    and the ones it switched off. Otherwise its known default layout, with
+    its own services on; and with neither, no loadout (an empty bar isn't a
+    shell): install it with its own installer, then save it."""
+    if sid not in all_suites:
+        raise Fail(f"no bar suite '{sid}' installed")
+    name = all_suites[sid]["name"]
+    cur = shell_config()
+    if bar_id(cur) == sid:
+        # exactly as it is, like saving it: its installer may keep other
+        # suites' plugins running for widgets it put on the bar
+        snap = snapshot(cur, name, sid)
+        snap["note"] = "taken from your shell as its installer set it up"
+        return snap
+    bar = default_bar(sid, all_suites)
+    if bar is None:
+        raise Fail(f"Shell-Swapper doesn't know a layout for {name}. Set it up with its own installer "
+                   f"(that makes it your bar), then save it here as a loadout (s in the picker, or: shell-swapper save \"{name}\").")
+    services = [{"id": pid} for pid, info in suite_plugins(sid, all_suites).items()
+                if "service" in (info["manifest"].get("kinds") or [])]
+    return {"name": name, "suite": sid, "bar": bar, "plugins": services, "disabledPlugins": []}
+
+
 def target_for(arg, all_suites, outs):
     """A loadout (by id), or a suite's default: "suite:<bar id>"."""
     if arg.startswith("suite:"):
-        sid = arg[6:]
-        if sid not in all_suites:
-            raise Fail(f"no bar suite '{sid}' installed")
-        return None, {"name": all_suites[sid]["name"], "suite": sid, "bar": default_bar(sid, all_suites),
-                      "plugins": [], "disabledPlugins": []}
+        return None, fresh_loadout(arg[6:], all_suites)
     check_id(arg)
     if arg not in outs:
         raise Fail(f"no loadout '{arg}'")
@@ -1929,7 +1950,9 @@ def listing():
                                for b in d.get("keybinds") or []]}
                      for lid, d in outs.items()],
         "suites": [{"id": s["id"], "name": s["name"], "description": s["description"],
-                    "hasLoadout": s["id"] in used} for s in all_suites.values()],
+                    "hasLoadout": s["id"] in used,
+                    "canStartFresh": s["id"] == bar_id(cur) or default_bar(s["id"], all_suites) is not None}
+                   for s in all_suites.values()],
     }
 
 

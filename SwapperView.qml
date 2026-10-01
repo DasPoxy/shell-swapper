@@ -862,7 +862,7 @@ FocusScope {
             width: parent.width
             elide: Text.ElideRight
             textFormat: Text.PlainText
-            text: row.modelData.kind === "suite" ? "its default layout · " + row.su.id
+            text: row.modelData.kind === "suite" ? (row.su.canStartFresh === false ? "set it up with its installer first · " : "its default layout · ") + row.su.id
               : [row.lo.name !== row.lo.suiteName ? row.lo.suiteName : "", row.lo.saved ? "saved " + row.lo.saved : ""]
                   .filter(function(x) { return x }).join(" · ")
             color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10)
@@ -910,7 +910,9 @@ FocusScope {
           wrapMode: Text.Wrap
           textFormat: Text.PlainText
           text: !detail.r ? "" : detail.r.kind === "suite"
-            ? (detail.r.s.description || "") + (detail.r.s.hasLoadout ? "" : "\n\nNo loadout for it yet: swapping makes one, with its default layout.")
+            ? (detail.r.s.description || "") + (detail.r.s.canStartFresh === false
+                ? "\n\nShell-Swapper doesn't know a layout for it. Set it up with its own installer (that makes it your bar), then save it here with s."
+                : detail.r.s.hasLoadout ? "" : "\n\nNo loadout for it yet: swapping makes one, with its default layout.")
             : sw.suiteName(detail.r.l.suite) + " · bar at the " + detail.r.l.position
               + (detail.r.l.note ? "\n" + detail.r.l.note : "")
           color: sw.dim; font.family: sw.font; font.pixelSize: sw.px(11)
