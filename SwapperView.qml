@@ -66,7 +66,7 @@ FocusScope {
 
   // ---- asking first: anything that would change your keys shows its plan --
   property var ask: null                // {title, lines: [{text, tone}], buttons: [{label, hint, key, primary, act}]}
-  function closeAsk() { ask = null; sw.forceActiveFocus() }
+  function closeAsk() { ask = null; sw.takeKeys() }
   function lineList(p) {
     var out = [], home = Quickshell.env("HOME") || ""
     function short(f) { return home && String(f).indexOf(home) === 0 ? "~" + String(f).slice(home.length) : String(f) }
@@ -404,7 +404,7 @@ FocusScope {
   function finishName(text) {
     var mode = editing
     editing = ""
-    sw.forceActiveFocus()
+    sw.takeKeys()
     if (!text) return
     if (mode === "save") run(["save", text], function(ok) { if (ok) say("Saved the current shell as " + text) })
     else if (mode === "rename" && sel) run(["rename", sel.id, text], function(ok) { if (ok) say("Renamed to " + text) })
@@ -527,8 +527,17 @@ FocusScope {
   Timer { id: statusTimer; interval: 5000; onTriggered: sw.status = "" }
 
   // ---- keys ----------------------------------------------------------------------------
+  // Keys go to this item, not the FocusScope itself: forceActiveFocus() on a
+  // scope hands focus back to whichever child last had it (the search box,
+  // say), so typing would land there instead.
   focus: true
-  Keys.onPressed: e => {
+  Item {
+    id: keyCatcher
+    focus: true
+    Keys.onPressed: e => sw.onKey(e)
+  }
+  function takeKeys() { keyCatcher.forceActiveFocus() }
+  function onKey(e) {
     if (editing !== "") return
     var k = e.key
     if (ask) {
@@ -808,7 +817,7 @@ FocusScope {
           anchors.fill: parent
           hoverEnabled: true
           cursorShape: Qt.PointingHandCursor
-          onClicked: { sw.cursor = row.index; sw.forceActiveFocus() }
+          onClicked: { sw.cursor = row.index; sw.takeKeys() }
           onDoubleClicked: { sw.cursor = row.index; sw.swap() }
         }
         }
@@ -952,7 +961,7 @@ FocusScope {
             required property var modelData
             text: modelData[2]; hint: modelData[1]
             on: sw.btab === modelData[0]
-            onClicked: { sw.btab = modelData[0]; sw.forceActiveFocus() }
+            onClicked: { sw.btab = modelData[0]; sw.takeKeys() }
           }
         }
       }
@@ -1014,9 +1023,9 @@ FocusScope {
             text: sw.filter
             onTextChanged: sw.filter = text
             color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(11)
-            Keys.onReturnPressed: sw.forceActiveFocus()
-            Keys.onEscapePressed: { text = ""; sw.forceActiveFocus() }
-            Keys.onDownPressed: { sw.forceActiveFocus(); sw.astep(1) }
+            Keys.onReturnPressed: sw.takeKeys()
+            Keys.onEscapePressed: { text = ""; sw.takeKeys() }
+            Keys.onDownPressed: { sw.takeKeys(); sw.astep(1) }
           }
         }
         ListView {
@@ -1060,7 +1069,7 @@ FocusScope {
                 text: aslot.modelData.bound || ""
                 color: sw.accent; font.family: sw.font; font.pixelSize: sw.px(10)
               }
-              MouseArea { id: aMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { sw.acur = aslot.index; sw.forceActiveFocus() } }
+              MouseArea { id: aMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { sw.acur = aslot.index; sw.takeKeys() } }
             }
           }
         }
@@ -1089,8 +1098,8 @@ FocusScope {
                 x: 8; width: parent.width - 16; anchors.verticalCenter: parent.verticalCenter
                 color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(11)
                 onTextChanged: { var v = Object.assign({}, sw.argVals); v[modelData] = text; sw.argVals = v }
-                Keys.onReturnPressed: sw.forceActiveFocus()
-                Keys.onEscapePressed: sw.forceActiveFocus()
+                Keys.onReturnPressed: sw.takeKeys()
+                Keys.onEscapePressed: sw.takeKeys()
               }
             }
           }
@@ -1119,7 +1128,7 @@ FocusScope {
               color: sw.capturing || sw.bkey ? sw.fg : sw.faint
               font.family: sw.font; font.pixelSize: sw.px(11); font.bold: !!sw.bkey && !sw.capturing
             }
-            MouseArea { id: capMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { sw.capturing = true; sw.forceActiveFocus() } }
+            MouseArea { id: capMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { sw.capturing = true; sw.takeKeys() } }
           }
         }
         // who has that key now
@@ -1185,7 +1194,7 @@ FocusScope {
               }
             }
           }
-          MouseArea { anchors.fill: parent; onClicked: { sw.tcur = trow.index; sw.forceActiveFocus() } }
+          MouseArea { anchors.fill: parent; onClicked: { sw.tcur = trow.index; sw.takeKeys() } }
         }
       }
     }

@@ -16,7 +16,7 @@ Item {
   function open(payloadJson) {
     root.opened = true
     view.refresh()
-    Qt.callLater(function() { view.forceActiveFocus() })
+    Qt.callLater(function() { view.takeKeys() })
   }
 
   function close() {
