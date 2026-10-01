@@ -1770,10 +1770,14 @@ def apply(arg, confirm=True, keys=None):
         lid, target = target_for(arg, all_suites, outs)
         cur = shell_config()
         active = st.get("active", "")
-        # keep tweaks made since: the shell you're leaving is saved first
-        # (not when re-applying the active loadout itself: that's putting it
-        # back, and saving the live config first would overwrite it)
-        if active in outs and active != lid and outs[active].get("suite") == bar_id(cur):
+        # keep tweaks made since: the shell you're leaving is saved first,
+        # but only if you changed it since it was last applied or kept (the
+        # loadout may be newer than the live config: edited, or repaired
+        # after a swap went back), and never when re-applying it itself
+        good = read_json(LAST_GOOD, None)
+        tweaked = not isinstance(good, dict) or any(cur.get(k) != good.get(k)
+                                                    for k in ("bar", "plugins", "disabledPlugins"))
+        if active in outs and active != lid and tweaked and outs[active].get("suite") == bar_id(cur):
             snap = snapshot(cur, outs[active].get("name", active), bar_id(cur))
             for k in ("note", "preview", "keybinds"):
                 if k in outs[active]:
