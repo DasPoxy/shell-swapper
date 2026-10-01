@@ -1771,7 +1771,9 @@ def apply(arg, confirm=True, keys=None):
         cur = shell_config()
         active = st.get("active", "")
         # keep tweaks made since: the shell you're leaving is saved first
-        if active in outs and outs[active].get("suite") == bar_id(cur):
+        # (not when re-applying the active loadout itself: that's putting it
+        # back, and saving the live config first would overwrite it)
+        if active in outs and active != lid and outs[active].get("suite") == bar_id(cur):
             snap = snapshot(cur, outs[active].get("name", active), bar_id(cur))
             for k in ("note", "preview", "keybinds"):
                 if k in outs[active]:
