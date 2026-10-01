@@ -41,6 +41,23 @@ reverts itself unless you keep it.
 
   Swaps never run while the screen is locked.
 
+**New shells are checked the first time they're seen** (a few seconds after
+the shell starts, and whenever the picker opens). A shell's own installer
+usually makes itself your bar before Shell-Swapper knows it exists, so:
+
+- if the new bar is your bar now, it's saved as a loadout straight away,
+  exactly as its installer set it up, before any swap could change it;
+- what its installer left on it from other shells (another suite's widgets
+  or plugins) is reported, with one click (plan first) to take them out;
+- it says if it can't tell which plugins are the shell's own, if a bar that
+  isn't set up yet needs its installer run first, or if it brings its own
+  notification server.
+
+You get a notification, and a note at the top of the picker. Starting fresh
+from a suite never makes an empty bar: it takes what its installer set up,
+or a layout the suite declares, or tells you to run its installer first.
+(`shell-swapper check [BAR_ID]` runs the same check by hand.)
+
 On first run it saves the shell you're using as a loadout. If Slime Shell's
 `slime-shell use` has a backup of the bar it replaced, that's imported as a
 loadout too.

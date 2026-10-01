@@ -35,6 +35,11 @@ Commands (all print JSON; errors go to stderr with exit status 1):
   rename ID NAME
   delete ID                     (not the active one)
   config [KEY VALUE]            settings: apply = restart | reload, confirmSeconds
+  check-new                     check bars installed since (a new one that's your bar
+                                now is saved as a loadout, as its installer set it up)
+  check [BAR_ID]                what a bar needs: its own plugins, others' widgets left on it...
+  strip-foreign ID              take other shells' widgets and plugins out of a loadout
+  notice-dismiss [BAR_ID]
 
 Keys (a loadout's own keybinds, in hypr/shell_swapper.lua; your bindings.lua
 is only touched when you move keys in or out, and always backed up first):
@@ -213,6 +218,10 @@ def rules(suite_id, all_suites=None):
         r.update({k: v for k, v in own.items() if k in ("enable", "disable", "owns", "layout")})
     if not r["owns"] and "." in suite_id and suite_id != "omarchy.bar":
         r["owns"] = [suite_id.rsplit(".", 1)[0] + "."]
+    elif not r["owns"] and suite_id != "omarchy.bar":
+        # no dot (celestune-bar): its name without the "bar" part
+        base = re.sub(r"[-_]?bar$", "", suite_id)
+        r["owns"] = [base] if base and base != suite_id else []
     return r
 
 
@@ -1629,6 +1638,120 @@ def restore_key_backup(name, yes):
     return dict(plan, restored=True)
 
 
+# ---- a new bar: checked the first time it's seen ------------------------------
+#
+# A shell's own installer usually makes itself your bar, with its layout and
+# plugins, before Shell-Swapper knows it exists. The first time a bar is seen
+# it's checked, and if it's your bar now it's saved as a loadout straight
+# away, exactly as its installer left it, so no swap can lose that setup.
+
+KNOWN = os.path.join(STATE, "known-suites.json")
+NOTICES = os.path.join(STATE, "notices.json")
+
+
+def check_suite(sid, all_suites, cur):
+    """What a bar needs before it's safe to swap to: is it your bar now,
+    which plugins are its own, what else its installer left on it."""
+    is_bar = bar_id(cur) == sid
+    own = suite_plugins(sid, all_suites)
+    kinds = {}
+    for info in own.values():
+        for k in info["manifest"].get("kinds") or []:
+            kinds[k] = kinds.get(k, 0) + 1
+    f = {"suite": sid, "name": all_suites[sid]["name"], "isBar": is_bar,
+         "ownPlugins": len(own), "ownKinds": kinds,
+         "declaresRules": isinstance(all_suites[sid]["manifest"].get("shellSwapper"), dict),
+         "layoutKnown": default_bar(sid, all_suites) is not None,
+         "notifiers": sorted(p for p, i in own.items()
+                             if "service" in (i["manifest"].get("kinds") or []) and "notif" in p),
+         "foreignWidgets": [], "foreignPlugins": [], "advice": []}
+    if is_bar:
+        lay = (cur.get("bar") or {}).get("layout") or {}
+        f["widgets"] = sum(len(v or []) for v in lay.values())
+        f["foreignWidgets"] = [entry_id(e) for sec in lay.values() for e in sec or []
+                               if owner(entry_id(e), all_suites) not in (None, sid)]
+        f["foreignPlugins"] = [entry_id(p) for p in cur.get("plugins") or []
+                               if owner(entry_id(p), all_suites) not in (None, sid)
+                               and entry_id(p) not in (cur.get("disabledPlugins") or [])]
+        if not f["widgets"]:
+            f["advice"].append("its bar has no widgets: run its installer again, then save it (s)")
+    elif not f["layoutKnown"]:
+        f["advice"].append("not set up yet: run its own installer (it makes itself your bar), then it's saved for you")
+    if f["foreignWidgets"] or f["foreignPlugins"]:
+        f["advice"].append(f"its installer left {len(f['foreignWidgets'])} widget(s) and {len(f['foreignPlugins'])} "
+                           "plugin(s) from other shells on it: remove them if they shouldn't be there")
+    if not f["ownPlugins"]:
+        f["advice"].append("Shell-Swapper can't tell which plugins are its own (it can say so in its manifest: shellSwapper.owns)")
+    if f["notifiers"]:
+        f["advice"].append("it has its own notification server (" + ", ".join(f["notifiers"]) +
+                           "): only one can run, so it's switched off while other shells are in use")
+    return f
+
+
+def check_new(auto=True):
+    """Bars not seen before: check each; save one that's your bar now as a
+    loadout (if it has none). Returns what's new."""
+    with Lock():
+        seed()
+        all_suites, cur = suites(), shell_config()
+        known = read_json(KNOWN, None)
+        if not isinstance(known, dict):
+            # first time: everything installed now is already known
+            known = {sid: {"firstSeen": now()} for sid in all_suites}
+            write_json(KNOWN, known)
+            return {"new": [], "initialized": True}
+        found = []
+        for sid in all_suites:
+            if sid in known:
+                continue
+            f = check_suite(sid, all_suites, cur)
+            outs = loadouts()
+            have = [lid for lid, d in outs.items() if d.get("suite") == sid]
+            f["loadout"] = have[0] if have else ""
+            if auto and f["isBar"] and not have and f.get("widgets"):
+                lid = unique_id(f["name"], set(outs))
+                snap = snapshot(cur, f["name"], sid)
+                snap["note"] = "saved when it was first found, exactly as its installer set it up"
+                save_loadout(lid, snap)
+                st = status()
+                set_status(active=lid, previous=st.get("active", "") if st.get("active") != lid else st.get("previous", ""))
+                f["loadout"], f["captured"] = lid, True
+            known[sid] = {"firstSeen": now()}
+            found.append(f)
+        if found:
+            write_json(KNOWN, known)
+            notes = read_json(NOTICES, []) or []
+            notes = [n for n in notes if n.get("suite") not in {f["suite"] for f in found}]
+            write_json(NOTICES, notes + [dict(f, at=now()) for f in found])
+        return {"new": found}
+
+
+def strip_foreign(lid, yes):
+    """Take other shells' widgets and plugins out of a loadout."""
+    with Lock():
+        all_suites, outs = suites(), loadouts()
+        d = outs.get(check_id(lid))
+        if d is None:
+            raise Fail(f"no loadout '{lid}'")
+        sid = d.get("suite", "")
+        lay = (d.get("bar") or {}).get("layout") or {}
+        widgets = [entry_id(e) for sec in lay.values() for e in sec or [] if owner(entry_id(e), all_suites) not in (None, sid)]
+        plugins = [entry_id(p) for p in d.get("plugins") or [] if owner(entry_id(p), all_suites) not in (None, sid)]
+        plan = {"action": "take other shells' widgets and plugins out of " + d.get("name", lid), "loadout": lid,
+                "widgets": widgets, "plugins": plugins, "activeNow": status().get("active", "") == lid,
+                "backupTo": LOADOUT_BACKUPS}
+        if not widgets and not plugins:
+            return dict(plan, nothing=True)
+        if not yes:
+            raise NeedsYes(plan)
+        for k in lay:
+            lay[k] = [e for e in lay[k] or [] if owner(entry_id(e), all_suites) in (None, sid)]
+        d["plugins"] = [p for p in d.get("plugins") or [] if owner(entry_id(p), all_suites) in (None, sid)]
+        d["disabledPlugins"] = [x for x in d.get("disabledPlugins") or [] if owner(str(x), all_suites) in (None, sid)]
+        save_loadout(lid, d)
+        return dict(plan, done=True, note="apply it (swap to it) to see it")
+
+
 def backups_listing():
     def rel(p):
         return os.path.relpath(p, BACKUPS)
@@ -1939,6 +2062,7 @@ def listing():
     used = {d.get("suite") for d in outs.values()}
     mine = {b["keys"]: b["line"] for b in user_binds()}
     return {
+        "notices": [n for n in (read_json(NOTICES, []) or []) if not n.get("dismissed")],
         "keysHook": hook_file(),
         "active": st.get("active", ""),
         "previous": st.get("previous", ""),
@@ -1979,7 +2103,28 @@ def run(argv):
             raise Fail("loadout-restore ID BACKUP (see backups)")
         return restore_loadout(rest[0], rest[1], "--yes" in rest)
     if cmd == "list":
+        check_new()   # a bar installed since: checked (and saved) before anything else
         return listing()
+    if cmd == "check-new":
+        return check_new()
+    if cmd == "check":
+        all_suites = suites()
+        sid = rest[0] if rest else bar_id(shell_config())
+        if sid not in all_suites:
+            raise Fail(f"no bar suite '{sid}' installed")
+        return check_suite(sid, all_suites, shell_config())
+    if cmd == "notice-dismiss":
+        with Lock():
+            notes = read_json(NOTICES, []) or []
+            for n in notes:
+                if not rest or n.get("suite") == rest[0]:
+                    n["dismissed"] = True
+            write_json(NOTICES, notes)
+        return {"dismissed": rest[0] if rest else "all"}
+    if cmd == "strip-foreign":
+        if not rest:
+            raise Fail("strip-foreign ID")
+        return strip_foreign(rest[0], "--yes" in rest)
     if cmd == "suites":
         return {"suites": [{k: v for k, v in s.items() if k != "manifest"} for s in suites().values()]}
     if cmd == "status":

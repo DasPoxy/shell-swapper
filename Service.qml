@@ -70,6 +70,28 @@ Item {
   Process { id: seenProc; onExited: pendingFile.reload() }
   Process { id: confirmProc; onExited: pendingFile.reload() }
 
+  // A bar installed since last time: checked once the shell has settled
+  // (its installer has just made itself your bar, most likely), and if it's
+  // your bar now it's saved as a loadout before anything can change it.
+  Timer { interval: 5000; running: true; onTriggered: newBarProc.running = true }
+  Process {
+    id: newBarProc
+    command: ["python3", svc.script, "check-new"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var r = null
+        try { r = JSON.parse(text) } catch (e) { return }
+        ;(r["new"] || []).forEach(function(f) {
+          var body = f.captured ? "It's your bar now: saved as a loadout, exactly as its installer set it up."
+                   : f.isBar ? "It's your bar now." : "Found, not set up yet: run its own installer first."
+          if (f.foreignWidgets.length || f.foreignPlugins.length)
+            body += " Its installer left " + f.foreignWidgets.length + " widget(s) from other shells on it."
+          Quickshell.execDetached(["notify-send", "-a", "Shell-Swapper", "New shell: " + f.name, body + " Open the picker to check it."])
+        })
+      }
+    }
+  }
+
   IpcHandler {
     target: "shell-swapper"
     // the CLI, after a swap that didn't restart the shell

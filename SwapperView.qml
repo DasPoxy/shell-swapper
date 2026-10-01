@@ -101,6 +101,13 @@ FocusScope {
         + "A key they replace keeps its line there, marked as replaced.", tone: "dim" })
       out.push({ text: p.activeNow ? "It's the shell you're using: they work now." : "They work when you swap to it (and bring its keys).", tone: "dim" })
     }
+    if (p.widgets || (p.plugins && p.action && p.action.indexOf("other shells") >= 0)) {
+      out.push({ text: "Takes these out of " + p.loadout + " (they belong to other shells):" })
+      ;(p.widgets || []).forEach(function(w) { out.push({ text: "widget  " + w, tone: "remove" }) })
+      ;(p.plugins || []).forEach(function(x) { out.push({ text: "plugin  " + x, tone: "remove" }) })
+      out.push({ text: p.activeNow ? "It's your shell now: swap to it again (or re-apply) to see it without them."
+                                   : "You'll see it the next time you swap to it.", tone: "dim" })
+    }
     if (p.set) {
       ;(p.unchanged || []).forEach(function(x) { out.push({ text: x.loadoutName + " already has " + x.keys + " for that: left as it is.", tone: "dim" }) })
       out.push({ text: p.set.length > 1 ? "Sets these keys:" : "Sets this key:" })
@@ -775,6 +782,40 @@ FocusScope {
         text: "using " + sw.suiteName(sw.info.current || "")
         textFormat: Text.PlainText
         color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(11)
+      }
+    }
+    // a shell found since last time: what the check found, and what to do
+    Rectangle {
+      readonly property var n: (sw.info.notices || []).length ? sw.info.notices[0] : null
+      visible: !!n && sw.mode === "list"
+      width: parent.width
+      height: visible ? noteCol.implicitHeight + 16 : 0
+      radius: sw.rad
+      color: sw.tint(sw.accent, 0.10)
+      border.color: sw.accent
+      Column {
+        id: noteCol
+        x: 12; y: 8; width: parent.width - 24
+        spacing: 4
+        readonly property var n: parent.n
+        Text {
+          width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
+          text: !noteCol.n ? "" : "New shell: " + noteCol.n.name + (noteCol.n.captured ? " (saved as a loadout, as its installer set it up)" : "")
+          color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(12); font.bold: true
+        }
+        Repeater {
+          model: noteCol.n ? noteCol.n.advice : []
+          Text { required property string modelData; width: noteCol.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; text: "·  " + modelData; color: sw.dim; font.family: sw.font; font.pixelSize: sw.px(11) }
+        }
+        Row {
+          spacing: 6
+          Btn {
+            visible: !!noteCol.n && !!noteCol.n.loadout && (noteCol.n.foreignWidgets.length + noteCol.n.foreignPlugins.length) > 0
+            text: "Remove other shells' widgets"; on: true
+            onClicked: sw.planRun(["strip-foreign", noteCol.n.loadout], function(ok) { if (ok) { sw.say("Removed. Swap to it (or re-apply) to see it."); sw.run(["notice-dismiss", noteCol.n.suite]) } })
+          }
+          Btn { text: "Got it"; onClicked: sw.run(["notice-dismiss", noteCol.n.suite]) }
+        }
       }
     }
     // a swap waiting to be kept
