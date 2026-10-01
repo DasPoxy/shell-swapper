@@ -57,14 +57,19 @@ Item {
     id: pendingFile
     path: svc.pendingPath
     printErrors: false
+    watchChanges: true
+    onFileChanged: reload()
     onLoaded: svc.readPending(text())
     onLoadFailed: svc.pending = null
   }
-  // look again while a swap is waiting (and when the CLI says so, below)
+  // Look again: often while a swap is waiting (for the countdown), and once
+  // a second otherwise. A swap made while the shell is running (reload mode)
+  // signals over IPC, but that can land mid-reload and be lost; without this
+  // the question never came up and only the picker showed it.
   Timer {
-    interval: 500
+    interval: svc.pending !== null ? 500 : 1000
     repeat: true
-    running: svc.pending !== null
+    running: true
     onTriggered: { svc.nowSec = Date.now() / 1000; pendingFile.reload() }
   }
   Process { id: seenProc; onExited: pendingFile.reload() }
