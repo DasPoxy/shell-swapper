@@ -936,6 +936,7 @@ FocusScope {
       readonly property var lay: !r ? null : r.kind === "loadout" ? r.l.layout : null
 
       Column {
+        id: detailCol
         width: parent.width
         spacing: 10
         visible: !!detail.r
@@ -994,34 +995,6 @@ FocusScope {
           }
         }
 
-        // its own keys (they come with it when you swap, if you say so)
-        Heading { visible: !!detail.r && detail.r.kind === "loadout"; text: "ITS KEYS" }
-        Text {
-          visible: !!detail.r && detail.r.kind === "loadout" && detail.r.l.keys.length === 0
-          width: parent.width
-          wrapMode: Text.Wrap
-          text: "None yet: your bindings.lua keys work the same in every shell. Press b to give this shell keys of its own."
-          color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(11)
-        }
-        Column {
-          visible: !!detail.r && detail.r.kind === "loadout" && detail.r.l.keys.length > 0
-          width: parent.width
-          spacing: 3
-          Repeater {
-            model: detail.r && detail.r.kind === "loadout" ? detail.r.l.keys : []
-            Row {
-              required property var modelData
-              spacing: 10
-              Text { width: sw.px(170); elide: Text.ElideRight; textFormat: Text.PlainText; text: modelData.keys; color: modelData.clashLine ? sw.urgent : sw.fg; font.family: sw.font; font.pixelSize: sw.px(11) }
-              Text {
-                textFormat: Text.PlainText
-                text: modelData.desc + (modelData.clashLine ? "   (also in bindings.lua, line " + modelData.clashLine + ": left out)" : "")
-                color: modelData.clashLine ? sw.urgent : sw.dim; font.family: sw.font; font.pixelSize: sw.px(11)
-              }
-            }
-          }
-        }
-
         Flow {
           width: parent.width
           spacing: 6
@@ -1039,6 +1012,49 @@ FocusScope {
             onClicked: sw.del()
           }
         }
+
+        // its own keys (they come with it when you swap, if you say so);
+        // the list below scrolls, so the buttons above stay in view
+        Heading { visible: !!detail.r && detail.r.kind === "loadout"; text: "ITS KEYS" + (detail.r && detail.r.kind === "loadout" && detail.r.l.keys.length ? "  (" + detail.r.l.keys.length + ")" : "") }
+        Text {
+          visible: !!detail.r && detail.r.kind === "loadout" && detail.r.l.keys.length === 0
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: "None yet: your bindings.lua keys work the same in every shell. Press k to give this shell keys of its own."
+          color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(11)
+        }
+      }
+      ListView {
+        id: detailKeys
+        objectName: "detailKeys"
+        visible: !!detail.r && detail.r.kind === "loadout" && detail.r.l.keys.length > 0
+        anchors { top: detailCol.bottom; topMargin: 6; bottom: parent.bottom; left: parent.left; right: parent.right; rightMargin: 8 }
+        clip: true
+        spacing: 3
+        boundsBehavior: Flickable.StopAtBounds
+        model: detail.r && detail.r.kind === "loadout" ? detail.r.l.keys : []
+        delegate: Row {
+          required property var modelData
+          spacing: 10
+          Text { width: sw.px(170); elide: Text.ElideRight; textFormat: Text.PlainText; text: modelData.keys; color: modelData.clashLine ? sw.urgent : sw.fg; font.family: sw.font; font.pixelSize: sw.px(11) }
+          Text {
+            width: detailKeys.width - sw.px(180)
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+            text: modelData.desc + (modelData.clashLine ? "   (also in bindings.lua, line " + modelData.clashLine + ": left out)" : "")
+            color: modelData.clashLine ? sw.urgent : sw.dim; font.family: sw.font; font.pixelSize: sw.px(11)
+          }
+        }
+      }
+      // a slim scrollbar when the keys don't all fit
+      Rectangle {
+        visible: detailKeys.visible && detailKeys.contentHeight > detailKeys.height
+        x: detail.width - 3
+        y: detailKeys.y + detailKeys.visibleArea.yPosition * detailKeys.height
+        width: 3
+        height: Math.max(sw.px(16), detailKeys.visibleArea.heightRatio * detailKeys.height)
+        radius: 1.5
+        color: sw.tint(sw.fg, 0.3)
       }
     }
   }
