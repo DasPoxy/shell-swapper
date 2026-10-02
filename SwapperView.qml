@@ -731,24 +731,27 @@ FocusScope {
     MouseArea { id: btnMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: btn.clicked() }
   }
 
-  // A bar's picture: so wide it'd be a sliver scaled down whole, so it's shown
-  // in three pieces (left, centre, right) stacked, each as wide as there's
-  // room (side by side for a bar on the left / right).
+  // A bar's picture: scaled down whole it'd be a sliver, so it's shown in
+  // pieces. A top / bottom bar: three strips (left, centre, right) stacked,
+  // each as wide as there's room. A bar on the left / right: cut into pieces
+  // about 240 px tall (2 to 8), side by side, near full size.
   component BarShot: Item {
     id: bs
     property var shot: null
+    property real maxPiece: 240           // how tall a piece of a side bar may be
     readonly property bool vertical: !!shot && (shot.position === "left" || shot.position === "right")
-    readonly property real pw: !shot ? 1 : vertical ? shot.w : shot.w / 3
-    readonly property real ph: !shot ? 1 : vertical ? shot.h / 3 : shot.h
-    readonly property real k: vertical ? Math.min(1.5, (width / 3) / pw) : width / pw
-    implicitHeight: !shot ? 0 : vertical ? ph * k : (ph * k) * 3 + 8
+    readonly property int pieces: !shot ? 0 : vertical ? Math.max(2, Math.min(10, Math.ceil(shot.h / maxPiece))) : 3
+    readonly property real pw: !shot ? 1 : vertical ? shot.w : shot.w / pieces
+    readonly property real ph: !shot ? 1 : vertical ? shot.h / pieces : shot.h
+    readonly property real k: !shot ? 1 : vertical ? Math.min(1.2, (width / pieces - 4) / pw, maxPiece / ph) : width / pw
+    implicitHeight: !shot ? 0 : vertical ? ph * k : (ph * k + 4) * pieces - 4
     Repeater {
-      model: bs.shot ? 3 : 0
+      model: bs.pieces
       Rectangle {
         required property int index
-        x: bs.vertical ? index * (bs.width / 3) : 0
+        x: bs.vertical ? index * (bs.pw * bs.k + 4) : 0
         y: bs.vertical ? 0 : index * (bs.ph * bs.k + 4)
-        width: bs.vertical ? bs.width / 3 - 4 : bs.width
+        width: bs.pw * bs.k
         height: bs.ph * bs.k
         radius: 4
         clip: true
@@ -1047,6 +1050,7 @@ FocusScope {
         }
         BarShot {
           visible: !!detail.r && detail.r.kind === "loadout" && sw.hasShot(detail.r.l) && sw.showPicture
+          maxPiece: 150   // shorter here, so its keys below keep room
           width: parent.width
           height: visible ? implicitHeight : 0
           shot: detail.r && detail.r.kind === "loadout" && sw.hasShot(detail.r.l) ? detail.r.l.preview : null

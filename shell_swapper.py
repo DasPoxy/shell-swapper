@@ -2018,6 +2018,10 @@ PREVIEWS = os.path.join(STATE, "previews")
 
 
 def hypr_json(*args):
+    # tests: SHELL_SWAPPER_HYPR_FIXTURES=<dir> with monitors.json, layers.json, activewindow.json
+    fx = os.environ.get("SHELL_SWAPPER_HYPR_FIXTURES")
+    if fx:
+        return read_json(os.path.join(fx, args[0] + ".json"), None)
     try:
         out = subprocess.run(["hyprctl", *args, "-j"], capture_output=True, text=True, timeout=3).stdout
         return json.loads(out)
@@ -2026,22 +2030,36 @@ def hypr_json(*args):
 
 
 def bar_region():
-    """(x, y, w, h, position) of the bar on the focused monitor, or None."""
+    """(x, y, w, h, position) of the bar on the focused monitor, in the
+    desktop's (logical) coordinates as grim takes them, or None. Bars on any
+    edge: top, bottom, left, right."""
     mons = hypr_json("monitors") or []
     mon = next((m for m in mons if m.get("focused")), mons[0] if mons else None)
     layers = hypr_json("layers") or {}
     if not mon or not isinstance(layers, dict):
         return None
+    sc = mon.get("scale", 1) or 1
+    mw, mh = mon["width"] / sc, mon["height"] / sc
+    if int(mon.get("transform", 0)) % 2:          # turned 90 / 270 degrees
+        mw, mh = mh, mw
+    mx, my = mon.get("x", 0), mon.get("y", 0)
     here = []
     for lvl in ((layers.get(mon["name"]) or {}).get("levels") or {}).values():
-        here += lvl
-    mx, my, mw, mh = mon["x"], mon["y"], mon["width"] / mon.get("scale", 1), mon["height"] / mon.get("scale", 1)
+        for l in lvl:
+            # layer positions may be the desktop's or the monitor's own
+            x = l["x"] if mx <= l["x"] < mx + mw else l["x"] + mx
+            y = l["y"] if my <= l["y"] < my + mh else l["y"] + my
+            here.append(dict(l, x=x, y=y))
 
     def edge(l):
+        # a floating bar sits a little off its edge (Ruixen's: 13 px down):
+        # within its own thickness (or 24 px) of the edge still counts
         if l["w"] >= mw * 0.9 and l["h"] <= mh * 0.2:
-            return "top" if l["y"] <= my + 2 else "bottom" if l["y"] + l["h"] >= my + mh - 2 else ""
+            gap = max(24, l["h"])
+            return "top" if l["y"] - my <= gap else "bottom" if (my + mh) - (l["y"] + l["h"]) <= gap else ""
         if l["h"] >= mh * 0.9 and l["w"] <= mw * 0.2:
-            return "left" if l["x"] <= mx + 2 else "right" if l["x"] + l["w"] >= mx + mw - 2 else ""
+            gap = max(24, l["w"])
+            return "left" if l["x"] - mx <= gap else "right" if (mx + mw) - (l["x"] + l["w"]) <= gap else ""
         return ""
     # Omarchy's own bar window (every suite's bar lives in it), else a bar-ish
     # layer, else a thin full-length one at an edge
@@ -2052,14 +2070,29 @@ def bar_region():
         if cands:
             l = max(cands, key=lambda l: l["w"] * l["h"])
             x, y, w, h, e = l["x"], l["y"], l["w"], l["h"], edge(l)
-            # drips hanging off the bar (Slime's): a little of them, so it
-            # looks like it does on screen
-            drips = [d for d in here if "drip" in str(d.get("namespace", "")).lower()]
-            if drips and e in ("top", "bottom"):
-                y, h = (y, h + 20) if e == "top" else (y - 20, h + 20)
-            elif drips and e in ("left", "right"):
-                x, w = (x, w + 20) if e == "left" else (x - 20, w + 20)
-            return (x, y, w, h, e)
+            # drips hanging off the bar (Slime's), on the side away from the
+            # edge: a little of them, so it looks like it does on screen
+            if any("drip" in str(d.get("namespace", "")).lower() for d in here):
+                if e == "top":
+                    h += 20
+                elif e == "bottom":
+                    y, h = y - 20, h + 20
+                elif e == "left":
+                    w += 20
+                else:
+                    x, w = x - 20, w + 20
+            return (int(x), int(y), int(w), int(h), e)
+    return None
+
+
+def png_size(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+    except OSError:
+        pass
     return None
 
 
@@ -2095,8 +2128,10 @@ def take_preview(lid=None, if_missing=False):
         if r.returncode != 0 or not os.path.exists(tmp):
             raise Fail("the screenshot didn't work: " + (r.stderr.strip() or "grim failed"))
         os.replace(tmp, path)
+        # the picture's own size (at a scaled display it's bigger than the bar's)
+        pw, ph = png_size(path) or (w, h)
         d = outs[lid]
-        d["preview"] = {"path": path, "w": w, "h": h, "position": pos, "at": now(), "t": int(time.time())}
+        d["preview"] = {"path": path, "w": pw, "h": ph, "position": pos, "at": now(), "t": int(time.time())}
         save_loadout(lid, d)
         return {"preview": d["preview"], "loadout": lid}
 
