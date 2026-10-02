@@ -1701,6 +1701,82 @@ def shell_targets(sid, all_suites):
     return marks
 
 
+# ---- a shell's upstream repo: its docs, when they weren't installed ----------
+#
+# Installed copies often leave the repo's docs behind (Ruixen's
+# docs/KEYBINDS.md). The repo is the one the manifest names, else the GitHub
+# link in the shell's own files whose name has the shell's name in it. Only
+# when you ask (f), only public GitHub, cached for a day.
+
+REMOTE_CACHE = os.path.join(HOME, ".cache/shell-swapper/remote")
+GITHUB_RE = re.compile(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?(?=[/\s\"'#)>\]]|$)")
+
+
+def shell_repo(sid, all_suites):
+    """owner/repo of a suite's upstream on GitHub, or ''."""
+    own = suite_plugins(sid, all_suites)
+    for info in own.values():
+        m = info["manifest"]
+        for v in ((m.get("shellSwapper") or {}).get("repo") if isinstance(m.get("shellSwapper"), dict) else None,
+                  m.get("repository"), m.get("homepage"), m.get("url"), m.get("source")):
+            g = GITHUB_RE.search(str(v or ""))
+            if g:
+                return g.group(1) + "/" + g.group(2)
+    # the shell's name: its id's words, minus the generic ones
+    words = {w for w in re.split(r"[.\-_]", sid.lower()) if len(w) >= 4} - {"omarchy", "shell", "plugin", "plugins", "suite"}
+    counts = {}
+    for info in own.values():
+        for f in glob.glob(os.path.join(info["dir"], "**", "*"), recursive=True):
+            if not f.endswith((".qml", ".js", ".md", ".json", ".sh", ".py", ".txt")) or os.path.getsize(f) > 2_000_000:
+                continue
+            try:
+                text = read_text(f) or ""
+            except (UnicodeDecodeError, ValueError, OSError):
+                continue
+            for g in GITHUB_RE.finditer(text):
+                name = g.group(2).lower()
+                if g.group(1).lower() != "repos" and any(w in name for w in words):
+                    k = g.group(1) + "/" + g.group(2)
+                    counts[k] = counts.get(k, 0) + 1
+    return max(counts, key=counts.get) if counts else ""
+
+
+def http_get(url, timeout=8):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "shell-swapper (keys find)"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(2_000_001)
+
+
+def remote_docs(repo):
+    """{path: text} of the repo's .md / .txt files that talk about binds
+    (cached for a day). {} when offline or it isn't public."""
+    os.makedirs(REMOTE_CACHE, exist_ok=True)
+    cache = os.path.join(REMOTE_CACHE, repo.replace("/", "__") + ".json")
+    c = read_json(cache, None)
+    if isinstance(c, dict) and time.time() - c.get("at", 0) < 86400:
+        return c.get("docs", {})
+    docs = {}
+    try:
+        tree = json.loads(http_get(f"https://api.github.com/repos/{repo}/git/trees/HEAD?recursive=1"))
+        paths = [t["path"] for t in tree.get("tree", []) if t.get("type") == "blob"
+                 and t["path"].lower().endswith((".md", ".txt")) and t.get("size", 0) < 400_000
+                 and "/node_modules/" not in "/" + t["path"]]
+        # the likely ones first (keybind docs, READMEs), at most 30 files
+        paths.sort(key=lambda p: (0 if re.search(r"key|bind", p, re.I) else 1 if "readme" in p.lower() else 2, p))
+        for p in paths[:30]:
+            try:
+                text = http_get(f"https://raw.githubusercontent.com/{repo}/HEAD/{p}").decode("utf-8", "replace")
+            except OSError:
+                continue
+            if re.search(r"(key)?binds?\b|keybindings?|bindings", text, re.I):
+                docs[p] = text
+    except (OSError, ValueError, KeyError):
+        return c.get("docs", {}) if isinstance(c, dict) else {}   # offline: whatever we had
+    write_json(cache, {"at": time.time(), "repo": repo, "docs": docs})
+    return docs
+
+
 def find_checkout(pid):
     """A copied-in plugin (no repo, no .synced-from): its checkout somewhere in
     your home, a folder named for it with the same manifest id (a shell's own
@@ -1720,7 +1796,7 @@ def find_checkout(pid):
     return ""
 
 
-def find_keys(lid):
+def find_keys(lid, remote=True, repo_override=""):
     """Binds a shell recommends, from its own checkout: READMEs, docs,
     scripts and code comments; only ones that call that shell."""
     all_suites, outs = suites(), loadouts()
@@ -1766,13 +1842,25 @@ def find_keys(lid):
                         found.append(b)
                         if f not in files:
                             files.append(f)
+    # its upstream repo's docs (installed copies often leave them behind)
+    repo = repo_override or (shell_repo(sid, all_suites) if remote else "")
+    remote_files = []
+    if repo and remote:
+        for path, text in remote_docs(repo).items():
+            for b in parse_import(text, prose=True)[0]:
+                if any(m in b["command"] for m in marks):
+                    b["file"] = f"github.com/{repo}/{path}"
+                    found.append(b)
+                    if b["file"] not in remote_files:
+                        remote_files.append(b["file"])
     seen, uniq = set(), []
     for b in found:
         k = (b["keys"], b["command"])
         if k not in seen:
             seen.add(k)
             uniq.append(b)
-    return {"loadout": lid, "suite": sid, "roots": sorted(roots), "files": files,
+    return {"loadout": lid, "suite": sid, "roots": sorted(roots) + ([f"github.com/{repo}"] if repo else []),
+            "repo": repo, "files": files + remote_files,
             "binds": uniq, "text": "\n".join(b["lua"] for b in uniq)}
 
 
@@ -2488,8 +2576,15 @@ def keys_cmd(rest):
         return {"templates": ts}
     if sub == "find":
         if len(args) < 2:
-            raise Fail("keys find ID")
-        return find_keys(args[1])
+            raise Fail("keys find ID [--local] [--repo owner/repo]")
+        repo = ""
+        if "--repo" in rest:
+            k = rest.index("--repo")
+            g = GITHUB_RE.search("github.com/" + rest[k + 1].split("github.com/")[-1]) if k + 1 < len(rest) else None
+            if not g:
+                raise Fail("--repo takes owner/repo (or its GitHub URL)")
+            repo = g.group(1) + "/" + g.group(2)
+        return find_keys(args[1], remote="--local" not in rest, repo_override=repo)
     if sub == "import":
         if len(args) < 2:
             raise Fail("keys import ID --text TEXT (or the text on stdin)")

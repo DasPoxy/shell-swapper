@@ -128,7 +128,13 @@ hot-reloads `shell.json`, no restart flash), and the keep-it timer.
   (or, for a shell its installer copied in, the checkout in your home it
   came from): code, scripts, recipes in comments, and every `.md` / `.txt`
   that talks about binds or keybinds, keeping only binds that call that
-  shell. Every bind found is checked: a combo Hyprland can bind (known
+  shell. Installed copies often leave the repo's docs behind (Ruixen's
+  `docs/KEYBINDS.md`), so **f** also reads the shell's upstream repo on
+  GitHub: the one its manifest names (`repository`, `homepage`, or
+  `shellSwapper.repo`), else the GitHub link in its own files whose name has
+  the shell's name in it. Only public GitHub, only when you press f, cached
+  for a day in `~/.cache/shell-swapper/remote/`; offline, it uses what's
+  local. Every bind found is checked: a combo Hyprland can bind (known
   modifiers, exactly one real key) and a whole command (no `<placeholder>`
   left in it); the rest are listed with what's wrong. On the right you see what each line became:
   new, replacing one of its keys, already there, or left out (and why: a
@@ -211,7 +217,7 @@ shell-swapper keys set ID "SUPER + ALT + C" "Dashboard" "omarchy-shell ruixen.no
 shell-swapper keys set-many '[{"loadout": ..., "keys": ..., "desc": ..., "command": ...}]'
 shell-swapper keys propose ID "SUPER + ALT + C" "omarchy-shell slime-shell toggleTab home"
 shell-swapper keys templates | template-save NAME JSON | template-delete NAME
-shell-swapper keys find ID                   # binds the shell's own files recommend
+shell-swapper keys find ID [--local] [--repo owner/repo]   # binds the shell's files and repo recommend
 shell-swapper keys import ID --check < binds.txt   # what a paste would become
 shell-swapper keys import ID --text '...'    # import (plan first; --yes to do it)
 shell-swapper backups                        # everything kept, by kind
