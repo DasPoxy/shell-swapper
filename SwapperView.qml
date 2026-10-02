@@ -108,6 +108,12 @@ FocusScope {
       out.push({ text: p.activeNow ? "It's your shell now: swap to it again (or re-apply) to see it without them."
                                    : "You'll see it the next time you swap to it.", tone: "dim" })
     }
+    if (p.takeOff) {
+      out.push({ text: "Takes these off " + (p.loadoutName || p.loadout) + "'s bar (only the bar: their plugins stay):" })
+      p.takeOff.forEach(function(w) { out.push({ text: w.id + (w.ownerName ? "   (" + w.ownerName + "'s)" : ""), tone: "remove" }) })
+      out.push({ text: p.activeNow ? "It's the shell you're using: swap to it again (or re-apply) to see it without them."
+                                   : "You'll see it the next time you swap to it.", tone: "dim" })
+    }
     if (p.set) {
       ;(p.unchanged || []).forEach(function(x) { out.push({ text: x.loadoutName + " already has " + x.keys + " for that: left as it is.", tone: "dim" }) })
       out.push({ text: p.set.length > 1 ? "Sets these keys:" : "Sets this key:" })
@@ -423,6 +429,11 @@ FocusScope {
   property bool showPicture: true        // the picture, or the sketch (v)
   property var hoverShot: null           // {shot, name, y}: a loadout under the mouse
   property bool pictureOnClose: false    // after a save: picture it once the picker's gone
+  function isForeign(r, id) { return !!r && r.kind === "loadout" && !!r.l.widgets && r.l.widgets.foreign.some(function(w) { return w.id === id }) }
+  function isMissing(r, id) { return !!r && r.kind === "loadout" && !!r.l.widgets && r.l.widgets.missing.some(function(w) { return w.id === id }) }
+  function takeOffForeign(lid, ids) {
+    planRun(["take-off", lid].concat(ids || []), function(ok) { if (ok) say("Taken off. It's in effect the next time you swap to it.") })
+  }
   function hasShot(l) { return !!l && !!l.preview && typeof l.preview === "object" && !!l.preview.path }
   function retakePicture() {
     if (!sel || sel.kind !== "loadout" || !sel.l.active) { say("Only the shell on screen can be pictured: swap to it first."); return }
@@ -782,12 +793,15 @@ FocusScope {
   // a widget in the bar sketch
   component Chip: Rectangle {
     property string label: ""
+    property bool foreign: false          // another shell's widget
+    property bool missing: false          // its plugin isn't installed
     height: sw.px(18)
     width: chipText.implicitWidth + 12
     radius: height / 2
-    color: sw.tint(sw.fg, 0.08)
-    border.color: sw.line
-    Text { id: chipText; anchors.centerIn: parent; text: parent.label; textFormat: Text.PlainText; color: sw.dim; font.family: sw.font; font.pixelSize: sw.px(9) }
+    color: foreign ? sw.tint(sw.urgent, 0.18) : sw.tint(sw.fg, 0.08)
+    border.color: foreign ? sw.urgent : sw.line
+    opacity: missing ? 0.45 : 1
+    Text { id: chipText; anchors.centerIn: parent; text: parent.label; textFormat: Text.PlainText; color: parent.foreign ? sw.urgent : sw.dim; font.strikeout: parent.missing; font.family: sw.font; font.pixelSize: sw.px(9) }
   }
 
   component KeyRow: Rectangle {
@@ -861,7 +875,8 @@ FocusScope {
         readonly property var n: parent.n
         Text {
           width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
-          text: !noteCol.n ? "" : "New shell: " + noteCol.n.name + (noteCol.n.captured ? " (saved as a loadout, as its installer set it up)" : "")
+          text: !noteCol.n ? "" : noteCol.n.kind === "foreign" ? "Another shell's widget on " + noteCol.n.name
+            : "New shell: " + noteCol.n.name + (noteCol.n.captured ? " (saved as a loadout, as its installer set it up)" : "")
           color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(12); font.bold: true
         }
         Repeater {
@@ -872,8 +887,12 @@ FocusScope {
           spacing: 6
           Btn {
             visible: !!noteCol.n && !!noteCol.n.loadout && (noteCol.n.foreignWidgets.length + noteCol.n.foreignPlugins.length) > 0
-            text: "Remove other shells' widgets"; on: true
-            onClicked: sw.planRun(["strip-foreign", noteCol.n.loadout], function(ok) { if (ok) { sw.say("Removed. Swap to it (or re-apply) to see it."); sw.run(["notice-dismiss", noteCol.n.suite]) } })
+            text: noteCol.n && noteCol.n.kind === "foreign" ? "Take it off" : "Remove other shells' widgets"; on: true
+            onClicked: {
+              var n = noteCol.n
+              var args = n.kind === "foreign" ? ["take-off", n.loadout].concat(n.foreignWidgets) : ["strip-foreign", n.loadout]
+              sw.planRun(args, function(ok) { if (ok) { sw.say("Taken off. Swap to it (or re-apply) to see it."); sw.run(["notice-dismiss", n.suite]) } })
+            }
           }
           Btn { text: "Got it"; onClicked: sw.run(["notice-dismiss", noteCol.n.suite]) }
         }
@@ -1086,11 +1105,41 @@ FocusScope {
                   spacing: 4
                   Repeater {
                     model: detail.lay ? detail.lay[side.modelData] || [] : []
-                    Chip { required property string modelData; label: sw.shortId(modelData) }
+                    Chip {
+                      required property string modelData
+                      label: sw.shortId(modelData)
+                      foreign: sw.isForeign(detail.r, modelData)
+                      missing: sw.isMissing(detail.r, modelData)
+                    }
                   }
                 }
               }
             }
+          }
+        }
+
+        // other shells' widgets on this bar (and ones not installed)
+        Row {
+          readonly property var wr: detail.r && detail.r.kind === "loadout" ? detail.r.l.widgets : null
+          visible: !!wr && (wr.foreign.length > 0 || wr.missing.length > 0)
+          width: parent.width
+          spacing: 8
+          Text {
+            width: parent.width - (takeOffBtn.visible ? takeOffBtn.width + 8 : 0)
+            anchors.verticalCenter: parent.verticalCenter
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
+            readonly property var wr: parent.wr
+            text: !wr ? "" : [wr.foreign.length ? "Other shells' widgets on this bar: " + wr.foreign.map(function(w) { return sw.shortId(w.id) + " (" + w.ownerName + ")" }).join(", ") : "",
+                              wr.missing.length ? "Not installed: " + wr.missing.map(function(w) { return w.id }).join(", ") : ""]
+                             .filter(function(x) { return x }).join(".  ")
+            color: sw.urgent; font.family: sw.font; font.pixelSize: sw.px(10)
+          }
+          Btn {
+            id: takeOffBtn
+            visible: !!parent.wr && parent.wr.foreign.length > 0
+            text: "Take them off"
+            onClicked: sw.takeOffForeign(detail.r.id)
           }
         }
 

@@ -107,6 +107,19 @@ the bar: a fullscreen window, or a swap still asking. They live in
 Along the bottom: **apply by** *restart* (the sure way) or *reload* (Omarchy
 hot-reloads `shell.json`, no restart flash), and the keep-it timer.
 
+## Widgets stay on their own shell's bar
+
+A widget belongs to a shell when that shell owns its plugin (`slime.*` is
+Slime's, `ruixen.*` Ruixen's, `hancore.shibumi.*` Shibumi's). One on another
+shell's bar is flagged: in the loadout's sketch (red), with a note under it
+and **Take them off** (plan first; only the bar changes, the plugins stay,
+since keys may still use them). A widget whose plugin isn't installed is
+shown struck through. When a save (yours, or the automatic one as you swap
+away) puts another shell's widget on a bar, the picker tells you, so one
+added through a bar's own widget picker doesn't go unnoticed.
+`shell-swapper widgets [ID]` lists them; `shell-swapper take-off ID [WIDGET...]`
+takes them off.
+
 ## Keybinds
 
 **k** (or the *Keybinds* button) on a loadout opens its keybinds:

@@ -39,6 +39,9 @@ Commands (all print JSON; errors go to stderr with exit status 1):
   check-new                     check bars installed since (a new one that's your bar
                                 now is saved as a loadout, as its installer set it up)
   check [BAR_ID]                what a bar needs: its own plugins, others' widgets left on it...
+  widgets [ID]                  other shells' widgets (and missing ones) on loadouts' bars
+  take-off ID [WIDGET...]       take other shells' widgets (or the ones named) off its bar
+                                (only the bar: plugins stay; plan first, --yes to do it)
   strip-foreign ID              take other shells' widgets and plugins out of a loadout
   notice-dismiss [BAR_ID]
 
@@ -1981,6 +1984,95 @@ def check_new(auto=True):
         return {"new": found}
 
 
+# ---- shell-specific widgets stay on their own shell's bar ----------------------
+#
+# A widget belongs to a shell when that shell owns its plugin (its id
+# prefix: slime.*, ruixen.*, hancore.shibumi.*). On another shell's bar it's
+# flagged (it may lean on its own bar to work, and it shows up where it
+# doesn't belong); so is a widget whose plugin isn't installed.
+
+def installed_ids():
+    """Every plugin id the shell knows, built-in widgets included."""
+    fx = os.environ.get("SHELL_SWAPPER_PLUGIN_LIST")
+    data = read_json(fx, None) if fx else None
+    if data is None and not fx:
+        try:
+            out = subprocess.run(["omarchy-plugin-list", "--json"], capture_output=True, text=True, timeout=5).stdout
+            data = json.loads(out)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            data = None
+    if isinstance(data, list) and data:
+        return {str(p.get("id")) for p in data if isinstance(p, dict)}
+    ids = set()   # the shell isn't running: the manifests on disk
+    for base in PLUGIN_DIRS:
+        for mf in glob.glob(os.path.join(base, "**", "*manifest.json"), recursive=True):
+            m = read_json(mf, None)
+            if isinstance(m, dict) and m.get("id"):
+                ids.add(str(m["id"]))
+    return ids
+
+
+def widget_report(d, all_suites, installed):
+    """A loadout's bar: widgets of other shells, and ones not installed."""
+    sid = d.get("suite", "")
+    lay = (d.get("bar") or {}).get("layout") or {}
+    foreign, missing = [], []
+    for section, entries in lay.items():
+        for e in entries or []:
+            wid = entry_id(e)
+            own = owner(wid, all_suites)
+            if own not in (None, sid):
+                foreign.append({"id": wid, "section": section, "owner": own,
+                                "ownerName": all_suites.get(own, {}).get("name", own)})
+            if installed and wid not in installed:
+                missing.append({"id": wid, "section": section})
+    return {"foreign": foreign, "missing": missing}
+
+
+def take_off_widgets(lid, ids, yes):
+    """Take widgets off a loadout's bar (only the bar: its plugins stay)."""
+    with Lock():
+        all_suites, outs = suites(), loadouts()
+        d = outs.get(check_id(lid))
+        if d is None:
+            raise Fail(f"no loadout '{lid}'")
+        rep = widget_report(d, all_suites, installed_ids())
+        if not ids:
+            ids = [w["id"] for w in rep["foreign"]]
+        lay = (d.get("bar") or {}).get("layout") or {}
+        present = {entry_id(e) for sec in lay.values() for e in sec or []}
+        take = [i for i in ids if i in present]
+        if not take:
+            return {"nothing": True, "loadout": lid}
+        names = {w["id"]: w["ownerName"] for w in rep["foreign"]}
+        active = status().get("active", "") == lid
+        plan = {"action": "take " + ("these widgets" if len(take) > 1 else "this widget") + " off " + d.get("name", lid) + "'s bar",
+                "loadout": lid, "loadoutName": d.get("name", lid),
+                "takeOff": [{"id": i, "ownerName": names.get(i, "")} for i in take],
+                "activeNow": active, "backupTo": LOADOUT_BACKUPS}
+        if not yes:
+            raise NeedsYes(plan)
+        for k in lay:
+            lay[k] = [e for e in lay[k] or [] if entry_id(e) not in take]
+        save_loadout(lid, d)
+        return dict(plan, done=True)
+
+
+def note_new_foreign(lid, before, after):
+    """A save that put another shell's widget on this bar: tell the picker."""
+    gained = [w for w in after["foreign"] if w["id"] not in {x["id"] for x in before["foreign"]}]
+    if not gained:
+        return
+    outs = loadouts()
+    name = outs.get(lid, {}).get("name", lid)
+    notes = [n for n in (read_json(NOTICES, []) or []) if not (n.get("kind") == "foreign" and n.get("loadout") == lid)]
+    notes.append({"kind": "foreign", "suite": "foreign:" + lid, "loadout": lid, "name": name, "at": now(),
+                  "foreignWidgets": [w["id"] for w in gained], "foreignPlugins": [],
+                  "advice": [f"{name}'s bar now has " + ", ".join(f"{w['id']} ({w['ownerName']}'s)" for w in gained)
+                             + ": widgets of another shell may not work, or look right, here"]})
+    write_json(NOTICES, notes)
+
+
 def strip_foreign(lid, yes):
     """Take other shells' widgets and plugins out of a loadout."""
     with Lock():
@@ -2303,6 +2395,7 @@ def apply(arg, confirm=True, keys=None):
                                                     for k in ("bar", "plugins", "disabledPlugins"))
         if active in outs and active != lid and tweaked and outs[active].get("suite") == bar_id(cur):
             snap = snapshot(cur, outs[active].get("name", active), bar_id(cur))
+            note_new_foreign(active, widget_report(outs[active], all_suites, set()), widget_report(snap, all_suites, set()))
             for k in ("note", "preview", "keybinds"):
                 if k in outs[active]:
                     snap[k] = outs[active][k]
@@ -2461,6 +2554,7 @@ def listing():
     all_suites, outs, st = suites(), loadouts(), status()
     cur = shell_config()
     used = {d.get("suite") for d in outs.values()}
+    inst = installed_ids()
     mine = {b["keys"]: b["line"] for b in user_binds()}
     return {
         "notices": [n for n in (read_json(NOTICES, []) or []) if not n.get("dismissed")],
@@ -2477,6 +2571,7 @@ def listing():
                       "note": d.get("note", ""), "preview": d.get("preview", ""),
                       "position": (d.get("bar") or {}).get("position", "top"),
                       "layout": summary_bar(d.get("bar")), "active": lid == st.get("active"),
+                      "widgets": widget_report(d, all_suites, inst),
                       "keys": [{"keys": b["keys"], "desc": b.get("desc", ""), "clashLine": mine.get(b["keys"], 0)}
                                for b in d.get("keybinds") or []]}
                      for lid, d in outs.items()],
@@ -2532,6 +2627,17 @@ def run(argv):
                     n["dismissed"] = True
             write_json(NOTICES, notes)
         return {"dismissed": rest[0] if rest else "all"}
+    if cmd == "widgets":
+        # widgets [ID]: other shells' widgets and missing ones, on a loadout's bar (or all)
+        all_suites, outs, inst = suites(), loadouts(), installed_ids()
+        pick = [check_id(rest[0])] if rest else sorted(outs)
+        return {lid: dict(widget_report(outs[lid], all_suites, inst), suite=outs[lid].get("suite", ""))
+                for lid in pick if lid in outs}
+    if cmd == "take-off":
+        # take-off ID [WIDGET...]: other shells' widgets (or those named) off its bar
+        if not rest:
+            raise Fail("take-off ID [WIDGET...]")
+        return take_off_widgets(rest[0], [a for a in rest[1:] if not a.startswith("--")], "--yes" in rest)
     if cmd == "strip-foreign":
         if not rest:
             raise Fail("strip-foreign ID")
@@ -2559,6 +2665,8 @@ def run(argv):
             for k in ("note", "preview", "keybinds"):
                 if lid in outs and k in outs[lid]:
                     snap[k] = outs[lid][k]
+            a_s = suites()
+            note_new_foreign(lid, widget_report(outs.get(lid) or {"suite": sid}, a_s, set()), widget_report(snap, a_s, set()))
             save_loadout(lid, snap)
             set_status(active=lid)
             write_json(LAST_GOOD, cur)
