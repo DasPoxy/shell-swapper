@@ -418,6 +418,24 @@ FocusScope {
   function setupHook() { planRun(["keys", "hook"], function(ok) { if (ok) say("Loadout keys are set up.") }) }
 
   function refresh() { if (!listProc.running) listProc.running = true }
+
+  // ---- pictures of the bars ----
+  property bool showPicture: true        // the picture, or the sketch (v)
+  property var hoverShot: null           // {shot, name, y}: a loadout under the mouse
+  property bool pictureOnClose: false    // after a save: picture it once the picker's gone
+  function hasShot(l) { return !!l && !!l.preview && typeof l.preview === "object" && !!l.preview.path }
+  function retakePicture() {
+    if (!sel || sel.kind !== "loadout" || !sel.l.active) { say("Only the shell on screen can be pictured: swap to it first."); return }
+    // the picker has to be out of the way first
+    Quickshell.execDetached(["sh", "-c", "sleep 1.2; exec python3 \"$0\" preview --auto", script])
+    say("Picturing it…")
+    if (closeRequest) closeRequest()
+  }
+  function pictureIfAsked() {
+    if (!pictureOnClose) return
+    pictureOnClose = false
+    Quickshell.execDetached(["sh", "-c", "sleep 1.2; exec python3 \"$0\" preview --auto", script])
+  }
   function say(text, bad) { status = text; statusBad = !!bad; statusTimer.restart() }
   function run(args, done) {
     if (actProc.running) return
@@ -448,7 +466,7 @@ FocusScope {
     editing = ""
     sw.takeKeys()
     if (!text) return
-    if (mode === "save") run(["save", text], function(ok) { if (ok) say("Saved the current shell as " + text) })
+    if (mode === "save") run(["save", text], function(ok) { if (ok) { say("Saved the current shell as " + text); pictureOnClose = true } })
     else if (mode === "rename" && sel) run(["rename", sel.id, text], function(ok) { if (ok) say("Renamed to " + text) })
   }
   function del() {
@@ -459,7 +477,7 @@ FocusScope {
     run(["delete", sel.id], function(ok) { if (ok) say("Deleted " + sel.name) })
   }
   onCursorChanged: armed = ""
-  onActiveChanged: if (active) refresh()
+  onActiveChanged: { if (active) refresh(); else pictureIfAsked() }
 
   Process {
     id: listProc
@@ -675,6 +693,8 @@ FocusScope {
     if (k === Qt.Key_Down || k === Qt.Key_J) step(1)
     else if (k === Qt.Key_Up) step(-1)
     else if (k === Qt.Key_K) openBinds("actions")
+    else if (k === Qt.Key_V) showPicture = !showPicture
+    else if (k === Qt.Key_P) retakePicture()
     else if (k === Qt.Key_Home) { cursor = 0; clampCursor() }
     else if (k === Qt.Key_End) { cursor = rows.length - 1; clampCursor() }
     else if (k === Qt.Key_Return || k === Qt.Key_Enter) swap()
@@ -709,6 +729,43 @@ FocusScope {
       Text { visible: btn.hint !== ""; text: btn.hint; color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10); anchors.verticalCenter: parent.verticalCenter }
     }
     MouseArea { id: btnMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: btn.clicked() }
+  }
+
+  // A bar's picture: so wide it'd be a sliver scaled down whole, so it's shown
+  // in three pieces (left, centre, right) stacked, each as wide as there's
+  // room (side by side for a bar on the left / right).
+  component BarShot: Item {
+    id: bs
+    property var shot: null
+    readonly property bool vertical: !!shot && (shot.position === "left" || shot.position === "right")
+    readonly property real pw: !shot ? 1 : vertical ? shot.w : shot.w / 3
+    readonly property real ph: !shot ? 1 : vertical ? shot.h / 3 : shot.h
+    readonly property real k: vertical ? Math.min(1.5, (width / 3) / pw) : width / pw
+    implicitHeight: !shot ? 0 : vertical ? ph * k : (ph * k) * 3 + 8
+    Repeater {
+      model: bs.shot ? 3 : 0
+      Rectangle {
+        required property int index
+        x: bs.vertical ? index * (bs.width / 3) : 0
+        y: bs.vertical ? 0 : index * (bs.ph * bs.k + 4)
+        width: bs.vertical ? bs.width / 3 - 4 : bs.width
+        height: bs.ph * bs.k
+        radius: 4
+        clip: true
+        color: "transparent"
+        border.color: sw.line
+        Image {
+          anchors.fill: parent
+          source: bs.shot ? "file://" + bs.shot.path + "?t=" + bs.shot.t : ""
+          cache: false
+          asynchronous: true
+          smooth: true
+          fillMode: Image.Stretch
+          sourceClipRect: !bs.shot ? Qt.rect(0, 0, 0, 0)
+            : bs.vertical ? Qt.rect(0, parent.index * bs.ph, bs.pw, bs.ph) : Qt.rect(parent.index * bs.pw, 0, bs.pw, bs.ph)
+        }
+      }
+    }
   }
 
   component Heading: Text {
@@ -768,7 +825,7 @@ FocusScope {
         : sw.btab === "templates" ? "1-4 tabs  ↑↓ pick  d forget  esc back"
         : sw.btab === "import" ? "1-4 tabs  e paste box  f find in its repo  i import  esc back"
         : "1-4 tabs  tab side  ↑↓ pick  space mark  m move in  d take out  o tidy  esc back")
-          : "↑↓ pick  ⏎ swap  k keybinds  s save  r rename  d delete  esc close"
+          : "↑↓ pick  ⏎ swap  k keybinds  v picture/sketch  p picture it  s save  r rename  d delete  esc close"
     color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10)
   }
   Column {
@@ -837,7 +894,10 @@ FocusScope {
           textFormat: Text.PlainText
           color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(12)
         }
-        Btn { text: "Keep"; on: true; onClicked: sw.run(["confirm"]) }
+        Btn {
+          text: "Keep"; on: true
+          onClicked: sw.run(["confirm"], function(ok) { if (ok) { sw.pictureOnClose = true; if (sw.closeRequest) sw.closeRequest() } })
+        }
         Btn { text: "Go back"; onClicked: Quickshell.execDetached(["python3", sw.script, "revert"]) }
       }
     }
@@ -924,6 +984,14 @@ FocusScope {
           cursorShape: Qt.PointingHandCursor
           onClicked: { sw.cursor = row.index; sw.takeKeys() }
           onDoubleClicked: { sw.cursor = row.index; sw.swap() }
+          // a loadout's picture while the mouse is on it (unless it's the one picked)
+          onContainsMouseChanged: {
+            var l = row.modelData.l
+            if (containsMouse && row.modelData.kind === "loadout" && sw.hasShot(l) && row.index !== sw.cursor)
+              sw.hoverShot = { shot: l.preview, name: l.name, y: row.mapToItem(sw, 0, 0).y }
+            else if (!containsMouse && sw.hoverShot && sw.hoverShot.name === (l ? l.name : ""))
+              sw.hoverShot = null
+          }
         }
         }
       }
@@ -962,9 +1030,35 @@ FocusScope {
         }
 
         // a sketch of its bar: what sits left, centre and right
-        Heading { visible: !!detail.lay; text: "ON ITS BAR" }
-        Rectangle {
+        Row {
           visible: !!detail.lay
+          spacing: 10
+          Heading { anchors.verticalCenter: parent.verticalCenter; text: "ON ITS BAR" }
+          Btn {
+            visible: !!detail.r && detail.r.kind === "loadout" && sw.hasShot(detail.r.l)
+            text: sw.showPicture ? "sketch" : "picture"; hint: "v"
+            onClicked: sw.showPicture = !sw.showPicture
+          }
+          Btn {
+            visible: !!detail.r && detail.r.kind === "loadout" && detail.r.l.active
+            text: sw.hasShot(detail.r ? detail.r.l : null) ? "retake picture" : "take its picture"; hint: "p"
+            onClicked: sw.retakePicture()
+          }
+        }
+        BarShot {
+          visible: !!detail.r && detail.r.kind === "loadout" && sw.hasShot(detail.r.l) && sw.showPicture
+          width: parent.width
+          height: visible ? implicitHeight : 0
+          shot: detail.r && detail.r.kind === "loadout" && sw.hasShot(detail.r.l) ? detail.r.l.preview : null
+        }
+        Text {
+          visible: !!detail.r && detail.r.kind === "loadout" && !sw.hasShot(detail.r.l)
+          width: parent.width; wrapMode: Text.Wrap
+          text: "No picture yet: it's taken when this shell is on screen (after you keep a swap to it)."
+          color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10)
+        }
+        Rectangle {
+          visible: !!detail.lay && !(detail.r && detail.r.kind === "loadout" && sw.hasShot(detail.r.l) && sw.showPicture)
           width: parent.width
           height: sketch.implicitHeight + 16
           radius: sw.rad
@@ -1506,6 +1600,26 @@ FocusScope {
           }
         }
       }
+    }
+  }
+
+  // ---- a loadout's picture, while the mouse is on it ----
+  Rectangle {
+    visible: !!sw.hoverShot && sw.mode === "list"
+    z: 30
+    x: Math.round(parent.width * 0.42) + 18
+    width: parent.width - x
+    y: !sw.hoverShot ? 0 : Math.max(0, Math.min(sw.hoverShot.y - 10, parent.height - height))
+    height: hsCol.implicitHeight + 20
+    radius: sw.rad
+    color: sw.solid
+    border.color: sw.accent
+    Column {
+      id: hsCol
+      x: 10; y: 10; width: parent.width - 20
+      spacing: 6
+      Text { textFormat: Text.PlainText; text: sw.hoverShot ? sw.hoverShot.name : ""; color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(12); font.bold: true }
+      BarShot { width: parent.width; height: implicitHeight; shot: sw.hoverShot ? sw.hoverShot.shot : null }
     }
   }
 

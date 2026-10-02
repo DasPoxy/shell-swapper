@@ -88,12 +88,22 @@ o.bind("SUPER + CTRL + ALT + BACKSPACE", "Shell-Swapper rescue", "shell-swapper 
 | ↑ ↓ | pick a loadout, or a suite to start fresh from |
 | Enter (or double-click) | swap to it |
 | k | its keybinds (see [Keybinds](#keybinds)) |
+| v | its picture, or its sketch |
+| p | picture the bar of the shell you're using |
 | s | save the current shell as a new loadout (or update one by its name) |
 | r | rename the loadout |
 | d, d | delete it (to `~/.local/state/shell-swapper/trash/`) |
 | Esc | close |
 
-The right side sketches the loadout's bar: what sits left, centre and right.
+The right side shows the loadout's bar: a **picture** of it (in three
+pieces, left / centre / right, so it's big enough to read; side by side for
+a bar on the left or right), or a **sketch** of what sits where (**v**
+switches). Hovering a loadout shows its picture larger. Only the shell on
+screen can be pictured, so pictures are taken when you keep a swap, when
+the shell starts with a loadout that has none, after you save one, or when
+you ask (**p** on the shell you're using). Never while something covers
+the bar: a fullscreen window, or a swap still asking. They live in
+`~/.local/state/shell-swapper/previews/`.
 Along the bottom: **apply by** *restart* (the sure way) or *reload* (Omarchy
 hot-reloads `shell.json`, no restart flash), and the keep-it timer.
 
@@ -200,6 +210,7 @@ shell-swapper confirm | revert      # answer a waiting swap
 shell-swapper save "Work bar"       # the current shell, as a loadout
 shell-swapper rename ID NAME | delete ID
 shell-swapper config apply reload   # or restart; config confirmSeconds 30
+shell-swapper preview               # picture the bar on screen, for its loadout
 shell-swapper rescue
 
 # keys: anything that would change the keys you have now prints its plan and

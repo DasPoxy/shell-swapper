@@ -35,6 +35,7 @@ Commands (all print JSON; errors go to stderr with exit status 1):
   rename ID NAME
   delete ID                     (not the active one)
   config [KEY VALUE]            settings: apply = restart | reload, confirmSeconds
+  preview [ID]                  picture the bar of the shell on screen, for its loadout
   check-new                     check bars installed since (a new one that's your bar
                                 now is saved as a loadout, as its installer set it up)
   check [BAR_ID]                what a bar needs: its own plugins, others' widgets left on it...
@@ -2006,6 +2007,100 @@ def strip_foreign(lid, yes):
         return dict(plan, done=True, note="apply it (swap to it) to see it")
 
 
+# ---- a picture of each shell's bar --------------------------------------------
+#
+# Only the shell on screen can be pictured, so it's taken then: after you
+# keep a swap, when the shell starts with a loadout that has none, after a
+# save, or when you ask. Never while something covers the bar (a fullscreen
+# window, a swap still asking).
+
+PREVIEWS = os.path.join(STATE, "previews")
+
+
+def hypr_json(*args):
+    try:
+        out = subprocess.run(["hyprctl", *args, "-j"], capture_output=True, text=True, timeout=3).stdout
+        return json.loads(out)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def bar_region():
+    """(x, y, w, h, position) of the bar on the focused monitor, or None."""
+    mons = hypr_json("monitors") or []
+    mon = next((m for m in mons if m.get("focused")), mons[0] if mons else None)
+    layers = hypr_json("layers") or {}
+    if not mon or not isinstance(layers, dict):
+        return None
+    here = []
+    for lvl in ((layers.get(mon["name"]) or {}).get("levels") or {}).values():
+        here += lvl
+    mx, my, mw, mh = mon["x"], mon["y"], mon["width"] / mon.get("scale", 1), mon["height"] / mon.get("scale", 1)
+
+    def edge(l):
+        if l["w"] >= mw * 0.9 and l["h"] <= mh * 0.2:
+            return "top" if l["y"] <= my + 2 else "bottom" if l["y"] + l["h"] >= my + mh - 2 else ""
+        if l["h"] >= mh * 0.9 and l["w"] <= mw * 0.2:
+            return "left" if l["x"] <= mx + 2 else "right" if l["x"] + l["w"] >= mx + mw - 2 else ""
+        return ""
+    # Omarchy's own bar window (every suite's bar lives in it), else a bar-ish
+    # layer, else a thin full-length one at an edge
+    for pick in (lambda l: l.get("namespace") == "omarchy-bar",
+                 lambda l: "bar" in str(l.get("namespace", "")).lower() and "drip" not in str(l.get("namespace", "")).lower(),
+                 lambda l: True):
+        cands = [l for l in here if pick(l) and edge(l)]
+        if cands:
+            l = max(cands, key=lambda l: l["w"] * l["h"])
+            x, y, w, h, e = l["x"], l["y"], l["w"], l["h"], edge(l)
+            # drips hanging off the bar (Slime's): a little of them, so it
+            # looks like it does on screen
+            drips = [d for d in here if "drip" in str(d.get("namespace", "")).lower()]
+            if drips and e in ("top", "bottom"):
+                y, h = (y, h + 20) if e == "top" else (y - 20, h + 20)
+            elif drips and e in ("left", "right"):
+                x, w = (x, w + 20) if e == "left" else (x - 20, w + 20)
+            return (x, y, w, h, e)
+    return None
+
+
+def take_preview(lid=None, if_missing=False):
+    """Picture the bar of the shell on screen, for its loadout."""
+    with Lock():
+        outs, st = loadouts(), status()
+        active = st.get("active", "")
+        lid = lid or active
+        if check_id(lid) not in outs:
+            raise Fail(f"no loadout '{lid}'")
+        p = outs[lid].get("preview")
+        if if_missing and isinstance(p, dict) and os.path.exists(p.get("path", "")):
+            return {"preview": p, "loadout": lid, "already": True}
+        if lid != active or outs[lid].get("suite") != bar_id(shell_config()):
+            raise Fail("only the shell on screen can be pictured: swap to it first")
+        if pending():
+            raise Fail("a swap is still asking to be kept")
+        if locked():
+            raise Fail("the screen is locked")
+        win = hypr_json("activewindow") or {}
+        if isinstance(win, dict) and win.get("fullscreen"):
+            raise Fail("a fullscreen window is covering the bar")
+        reg = bar_region()
+        if not reg:
+            raise Fail("couldn't find the bar on screen")
+        x, y, w, h, pos = reg
+        os.makedirs(PREVIEWS, exist_ok=True)
+        path = os.path.join(PREVIEWS, lid + ".png")
+        tmp = path + ".tmp.png"
+        cmd = os.environ.get("SHELL_SWAPPER_GRIM", "grim")
+        r = subprocess.run(shlex.split(cmd) + ["-g", f"{x},{y} {w}x{h}", tmp], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0 or not os.path.exists(tmp):
+            raise Fail("the screenshot didn't work: " + (r.stderr.strip() or "grim failed"))
+        os.replace(tmp, path)
+        d = outs[lid]
+        d["preview"] = {"path": path, "w": w, "h": h, "position": pos, "at": now(), "t": int(time.time())}
+        save_loadout(lid, d)
+        return {"preview": d["preview"], "loadout": lid}
+
+
 def backups_listing():
     def rel(p):
         return os.path.relpath(p, BACKUPS)
@@ -2361,6 +2456,16 @@ def run(argv):
         return listing()
     if cmd == "check-new":
         return check_new()
+    if cmd == "preview":
+        # preview [ID] [--auto]: --auto (the shell's own triggers) says nothing
+        # when it can't, rather than failing
+        ids = [a for a in rest if not a.startswith("--")]
+        try:
+            return take_preview(ids[0] if ids else None, if_missing="--if-missing" in rest)
+        except Fail as e:
+            if "--auto" in rest:
+                return {"preview": None, "why": str(e)}
+            raise
     if cmd == "check":
         all_suites = suites()
         sid = rest[0] if rest else bar_id(shell_config())

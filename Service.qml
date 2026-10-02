@@ -90,7 +90,18 @@ Item {
     onTriggered: { svc.nowSec = Date.now() / 1000; pendingFile.reload() }
   }
   Process { id: seenProc; onExited: pendingFile.reload() }
-  Process { id: confirmProc; onExited: pendingFile.reload() }
+  Process { id: confirmProc; onExited: { pendingFile.reload(); pictureSoon.restart() } }
+
+  // A picture of the bar for its loadout (the picker shows it): once a swap
+  // is kept (the question gone from the screen), and at start-up if the
+  // shell on screen has none yet. The CLI skips it when something covers
+  // the bar (a fullscreen window, a swap still asking).
+  Timer { id: pictureSoon; interval: 1500; onTriggered: pictureProc.startWith(["preview", "--auto"]) }
+  Timer { interval: 9000; running: true; onTriggered: pictureProc.startWith(["preview", "--auto", "--if-missing"]) }
+  Process {
+    id: pictureProc
+    function startWith(args) { if (!running) { command = ["python3", svc.script].concat(args); running = true } }
+  }
 
   // A bar installed since last time: checked once the shell has settled
   // (its installer has just made itself your bar, most likely), and if it's
