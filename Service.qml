@@ -25,6 +25,23 @@ Item {
   property string announced: ""         // the swap we've told the CLI is on screen
   property real nowSec: Date.now() / 1000
   readonly property bool asking: pending !== null && answered !== pending.token
+
+  // The keyboard: the question asks for it, but the compositor can give it
+  // elsewhere, e.g. the picker (which grabs it too) is still up when the
+  // question appears, and when the picker closes the keyboard goes back to
+  // your window instead. So while asking, if this window isn't the one
+  // getting keys, its grab is dropped and taken again (that makes the
+  // compositor hand the keyboard over); while it has the keys, it's left be.
+  property bool grab: true
+  onAskingChanged: if (asking) { grab = true; Qt.callLater(svc.takeKeys) }
+  function takeKeys() { if (svc.asking) keys.forceActiveFocus() }
+  Timer {
+    interval: 600
+    repeat: true
+    running: svc.asking
+    onTriggered: if (!keys.Window.active) { svc.grab = false; regrab.restart() }
+  }
+  Timer { id: regrab; interval: 80; onTriggered: { svc.grab = true; svc.takeKeys() } }
   readonly property int secondsLeft: !pending ? 0
     : pending.seen ? Math.max(0, Math.ceil(pending.deadline - nowSec)) : pending.confirmSeconds
   readonly property real fraction: !pending ? 0 : Math.max(0, Math.min(1, secondsLeft / Math.max(1, pending.confirmSeconds)))
@@ -114,7 +131,7 @@ Item {
     color: "transparent"
     WlrLayershell.namespace: "shell-swapper-ask"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    WlrLayershell.keyboardFocus: svc.grab ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore
 
     readonly property color fg: Color.menu.text
