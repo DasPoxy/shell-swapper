@@ -555,7 +555,8 @@ FocusScope {
         var r = null
         try { r = JSON.parse(text) } catch (e) { return }
         sw.importFound = (r.files || []).length ? (r.binds.length + " found in " + r.files.map(function(f) { return f.split("/").pop() }).join(", "))
-                                                 : "none found in its plugins (" + (r.roots || []).length + " folder" + ((r.roots || []).length === 1 ? "" : "s") + " looked through)"
+                                                 : "none found in " + (r.roots || []).map(function(x) { return x.replace(Quickshell.env("HOME") || "", "~") }).slice(0, 2).join(", ")
+                                                   + ((r.roots || []).length > 2 ? " and " + ((r.roots || []).length - 2) + " more" : "")
         if (r.text) sw.importText = (sw.importText.trim() ? sw.importText.trim() + "\n" : "") + r.text
       }
     }

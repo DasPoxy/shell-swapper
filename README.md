@@ -121,9 +121,16 @@ hot-reloads `shell.json`, no restart flash), and the keep-it timer.
 - **4 Import.** Paste the binds a shell's repo recommends (its README, docs,
   install notes), in Omarchy's style (`o.bind("SUPER + R", "Launcher",
   "omarchy-shell ...")`) or Hyprland's (`bind = SUPER ALT, C, exec, ...`,
-  `bindd` with a description). **f** looks through the shell's own checkout
-  for you: READMEs, docs, scripts and recipes in code comments, keeping only
-  binds that call that shell. On the right you see what each line became:
+  `bindd` with a description). Keybinds written as a README table or list
+  count too (`| Super + Alt + C | Command centre | \`omarchy-shell ...\` |`,
+  ``- `Super+R`: launcher (`omarchy-shell ...`)``): a whole key combo and a
+  command beside it. **f** looks through the shell's own checkout for you
+  (or, for a shell its installer copied in, the checkout in your home it
+  came from): code, scripts, recipes in comments, and every `.md` / `.txt`
+  that talks about binds or keybinds, keeping only binds that call that
+  shell. Every bind found is checked: a combo Hyprland can bind (known
+  modifiers, exactly one real key) and a whole command (no `<placeholder>`
+  left in it); the rest are listed with what's wrong. On the right you see what each line became:
   new, replacing one of its keys, already there, or left out (and why: a
   non-exec Hyprland bind, the same key twice, a call it already has on
   another key, prose). **i** imports them, after showing the plan: into the

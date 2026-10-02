@@ -1436,11 +1436,119 @@ def hypr_conf_bind(line):
     return (keys, desc or arg, arg)
 
 
-def parse_import(text):
-    """Pasted text -> binds found, and the lines that weren't."""
-    found, skipped, lua_lines = [], [], []
+# ---- keybinds written in prose (READMEs, notes) --------------------------------
+#
+# READMEs often list keys as a table or a list rather than as code:
+#   | Super + Alt + C | Command centre | `omarchy-shell slime-shell toggleTab home` |
+#   - `Super+R`: the launcher (`omarchy-shell slime-launcher apps`)
+# A line counts only with a whole key combo (modifiers + one key) AND a
+# command beside it; every bind found (prose or code) has its combo checked.
+
+MOD_ALIASES = {"super": "SUPER", "mod4": "SUPER", "mod": "SUPER", "meta": "SUPER", "win": "SUPER",
+               "windows": "SUPER", "cmd": "SUPER", "$mainmod": "SUPER", "$mod": "SUPER", "logo": "SUPER",
+               "ctrl": "CTRL", "control": "CTRL", "ctl": "CTRL", "alt": "ALT", "shift": "SHIFT"}
+KEY_ALIASES = {"enter": "RETURN", "esc": "ESCAPE", "del": "DELETE", "pageup": "PRIOR", "pagedown": "NEXT",
+               "pgup": "PRIOR", "pgdn": "NEXT", "bksp": "BACKSPACE", "/": "SLASH", ".": "PERIOD", ",": "COMMA"}
+KEY_NAMES = {"RETURN", "SPACE", "TAB", "ESCAPE", "BACKSPACE", "DELETE", "SLASH", "PERIOD", "COMMA", "MINUS",
+             "EQUAL", "GRAVE", "SEMICOLON", "APOSTROPHE", "BACKSLASH", "BRACKETLEFT", "BRACKETRIGHT", "LEFT",
+             "RIGHT", "UP", "DOWN", "HOME", "END", "PRINT", "INSERT", "PRIOR", "NEXT"}
+_MOD = r"(?:super|mod4|mod|meta|win|windows|cmd|logo|ctrl|control|ctl|alt|shift|\$mainmod|\$mod)"
+_KEY = (r"(?:f(?:2[0-4]|1[0-9]|[1-9])|return|enter|space|tab|escape|esc|backspace|bksp|delete|del|slash|period|"
+        r"comma|minus|equal|grave|semicolon|apostrophe|backslash|bracketleft|bracketright|left|right|up|down|home|"
+        r"end|print|insert|pageup|pagedown|pgup|pgdn|[a-z0-9]|[/.,])")
+COMBO_RE = re.compile(rf"(?<![\w$])({_MOD}(?:\s*[+\-]\s*{_MOD})*\s*[+\-]\s*{_KEY})(?![\w])", re.I)
+CMD_START = re.compile(r"^(omarchy-|uwsm|hyprctl|notify-send|xdg-open|qs |quickshell |[a-z][\w.-]*-[\w.-]+ )")
+
+
+def combo_problem(keys):
+    """'' if a combo is a well-formed bind, else what's wrong with it."""
+    parts = [p.strip().upper() for p in str(keys).split("+")]
+    if any(not p for p in parts):
+        return "a '+' with nothing on one side"
+    mods = [p for p in parts if p in MODS]
+    rest = [p for p in parts if p not in MODS]
+    if len(rest) != 1:
+        return "no key after the modifiers" if not rest else "more than one key (" + " + ".join(rest) + ")"
+    k = rest[0]
+    if not (re.fullmatch(r"[A-Z0-9]", k) or re.fullmatch(r"F(?:2[0-4]|1[0-9]|[1-9])", k) or k in KEY_NAMES
+            or re.fullmatch(r"MOUSE:\d+|XF86\w+|CODE:\d+", k)):
+        return f"'{k}' isn't a key name Hyprland knows"
+    if len(set(mods)) != len(mods):
+        return "a modifier twice"
+    return ""
+
+
+def norm_combo(text):
+    parts = [p for p in re.split(r"\s*[+\-]\s*", text.strip()) if p]
+    out = []
+    for p in parts:
+        low = p.lower()
+        out.append(MOD_ALIASES.get(low) or KEY_ALIASES.get(low) or p.upper())
+    return norm_keys(" + ".join(out))
+
+
+def parse_prose(line):
+    """One line of a README / notes -> (bind or None, reason it's left out or '')."""
+    raw = line.strip()
+    clean = re.sub(r"</?kbd>|\*\*|__", "", raw)
+    clean = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", clean)       # list markers
+    spans = re.findall(r"`([^`]+)`", clean)
+    flat = re.sub(r"`", "", clean)
+    m = COMBO_RE.search(re.sub(r"\s*`\s*", "", clean) if re.search(r"`[A-Za-z$]+`\s*[+\-]\s*`", clean) else flat)
+    listing = bool(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", raw) or "|" in raw or "`" in raw or "<kbd>" in raw.lower())
+    if not m:
+        # a modifier and a '+', a command, but no combo Hyprland could bind
+        if re.search(r"(?<![\w$])(?:super|ctrl|control|alt|shift|\$mainmod|\$mod|mod4?)\s*\+", flat, re.I) and (
+                any(" " in x.strip() for x in spans) or "omarchy-shell" in flat):
+            return None, "its key combo isn't one Hyprland can bind (check the + signs and the key)"
+        return None, ""
+    combo = m.group(1)
+    keys = norm_combo(combo)
+    # the command: a backticked span that isn't the combo, else an omarchy-shell call
+    cmd = ""
+    for s in spans:
+        s2 = s.strip()
+        if COMBO_RE.fullmatch(s2) or norm_combo(s2) == keys or not s2:
+            continue
+        if " " in s2 or CMD_START.match(s2):
+            cmd = s2
+            break
+    if not cmd:
+        mm = re.search(r"(omarchy-shell\s+[^|`)\]\n]+)", flat)
+        cmd = mm.group(1).strip().rstrip(".,;") if mm else ""
+    if not cmd:
+        # plain prose that mentions a key ("Alt-tab still works") isn't a bind
+        return None, ("a key, but no command beside it" if listing else "")
+    # what it does: a table's other cell, or the rest of the line
+    if "|" in clean:
+        cells = [c.replace("`", "").strip() for c in clean.strip().strip("|").split("|")]
+        rest = [c for c in cells if c and c != cmd and not COMBO_RE.search(c) and c != combo]
+        desc = rest[0] if rest else ""
+    else:
+        desc = flat.replace(combo, " ").replace(cmd, " ")
+        desc = re.sub(r"[()\[\]:→=>—–|]+", " ", desc)
+        desc = re.sub(r"\s+", " ", desc).strip(" -.,;")
+    desc = (desc or cmd)[:80]
+    return {"keys": keys, "desc": desc, "command": cmd, "lua": bind_lua(keys, desc, cmd),
+            "from": raw[:120], "loose": True}, ""
+
+
+def parse_import(text, prose=True):
+    """Pasted text -> binds found, and the lines that weren't. With prose,
+    keybinds written as README tables / lists count too."""
+    found, skipped, lua_lines, prose_found = [], [], [], []
     for raw in text.replace("\r", "").split("\n"):
         line = re.sub(r"^\s*(//+|\*)\s?", "", raw)            # recipes inside code comments
+        if prose and not HYPR_BIND_RE.match(line) and not re.search(r"\b(o\.bind|hl\.bind|hl\.unbind)\s*\(", line):
+            b, why = parse_prose(line)
+            if b:
+                prose_found.append(b)
+                lua_lines.append("")
+                continue
+            if why:
+                skipped.append({"line": line.strip()[:120], "why": why})
+                lua_lines.append("")
+                continue
         if HYPR_BIND_RE.match(line):
             r = hypr_conf_bind(line)
             if isinstance(r, tuple):
@@ -1480,6 +1588,18 @@ def parse_import(text):
         found.append({"keys": info["keys"], "desc": info["desc"], "command": bind_command(one), "lua": one,
                       "from": stmt.split("\n")[0][:120]})
         spans.append((m.start(), i))
+    found += prose_found
+    # every bind, however it was written: a combo Hyprland can bind, a command
+    good = []
+    for b in found:
+        why = combo_problem(b["keys"]) or ("no command" if not b.get("command") else "") or (
+            "its command has a placeholder to fill in (" + re.search(r"<[\w .-]+>", b["command"]).group(0) + ")"
+            if re.search(r"<[\w .-]+>", b.get("command", "")) else "")
+        if why:
+            skipped.append({"line": b["from"], "why": why})
+        else:
+            good.append(b)
+    found = good
     # lines with something on them that wasn't a bind (for the preview)
     for st, en in lua_statements(lua):
         if any(a <= st < b or st <= a < en for a, b in spans):
@@ -1488,6 +1608,8 @@ def parse_import(text):
         info = classify(stmt)
         if info and info["kind"] == "unbind":
             continue   # Shell-Swapper writes its own hl.unbind before each key
+        if prose:
+            continue   # prose is mostly not binds: only lines with a key in them are reported
         if stmt and not stmt.startswith(("--", "#", "```")) and len(skipped) < 40:
             skipped.append({"line": stmt.split("\n")[0][:120], "why": "not a bind"})
     return found, skipped
@@ -1579,6 +1701,25 @@ def shell_targets(sid, all_suites):
     return marks
 
 
+def find_checkout(pid):
+    """A copied-in plugin (no repo, no .synced-from): its checkout somewhere in
+    your home, a folder named for it with the same manifest id (a shell's own
+    installer often copies from one, like ~/Shibumi-Shell)."""
+    skip = {os.path.join(HOME, x) for x in (".cache", ".local", ".config", ".mozilla", ".steam", ".var")}
+    for top, dirs, _ in os.walk(HOME):
+        depth = top[len(HOME):].count(os.sep)
+        dirs[:] = [d for d in dirs if not d.startswith(".") and os.path.join(top, d) not in skip
+                   and d not in ("node_modules", "venv", ".venv")] if depth < 3 else []
+        if pid in dirs:
+            m = read_json(os.path.join(top, pid, "manifest.json"), None)
+            if isinstance(m, dict) and m.get("id") == pid:
+                r = subprocess.run(["git", "-C", os.path.join(top, pid), "rev-parse", "--show-toplevel"],
+                                   capture_output=True, text=True)
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout.strip()
+    return ""
+
+
 def find_keys(lid):
     """Binds a shell recommends, from its own checkout: READMEs, docs,
     scripts and code comments; only ones that call that shell."""
@@ -1599,16 +1740,27 @@ def find_keys(lid):
         if not root or plugins_home == root or plugins_home.startswith(root + os.sep):
             root = src
         roots.add(root)
+    # all copies without a repo: look for the checkout they came from
+    if all(subprocess.run(["git", "-C", r, "rev-parse"], capture_output=True).returncode != 0 for r in roots):
+        co = find_checkout(sid)
+        if co:
+            roots = {co}
     found, files = [], []
     for root in sorted(roots):
         for pat in ("**/*.md", "**/*.lua", "**/*.conf", "**/*.sh", "**/*.qml", "**/*.js", "**/*.txt"):
             for f in glob.glob(os.path.join(root, pat), recursive=True):
                 if "/node_modules/" in f or "/.git/" in f:
                     continue
-                text = read_text(f) or ""
-                if "bind" not in text:
+                try:
+                    text = read_text(f) or ""
+                except (UnicodeDecodeError, ValueError):
+                    continue   # not text (a binary, another encoding): nothing to find in it
+                doc = f.endswith((".md", ".txt"))
+                if doc and not re.search(r"(key)?binds?\b|keybindings?|bindings", text, re.I):
                     continue
-                for b in parse_import(text)[0]:
+                if not doc and "bind" not in text:
+                    continue
+                for b in parse_import(text, prose=doc)[0]:
                     if any(m in b["command"] for m in marks):
                         b["file"] = os.path.relpath(f, root)
                         found.append(b)
