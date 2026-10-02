@@ -2061,27 +2061,44 @@ def bar_region():
             gap = max(24, l["w"])
             return "left" if l["x"] - mx <= gap else "right" if (mx + mw) - (l["x"] + l["w"]) <= gap else ""
         return ""
+    # The edge the compositor keeps clear for a bar (the monitor's reserved
+    # space: left, top, right, bottom): where the bar is, whatever draws it.
+    res = list(mon.get("reserved") or [0, 0, 0, 0])[:4] + [0, 0, 0, 0]
+    names = ["left", "top", "right", "bottom"]
+    i_max = max(range(4), key=lambda i: res[i])
+    bar_edge = names[i_max] if res[i_max] >= 16 else ""
     # Omarchy's own bar window (every suite's bar lives in it), else a bar-ish
-    # layer, else a thin full-length one at an edge
+    # layer, else a thin full-length one at an edge; on the reserved edge if
+    # there is one
+    found = None
     for pick in (lambda l: l.get("namespace") == "omarchy-bar",
                  lambda l: "bar" in str(l.get("namespace", "")).lower() and "drip" not in str(l.get("namespace", "")).lower(),
                  lambda l: True):
-        cands = [l for l in here if pick(l) and edge(l)]
+        cands = [l for l in here if pick(l) and edge(l) and (not bar_edge or edge(l) == bar_edge)]
         if cands:
             l = max(cands, key=lambda l: l["w"] * l["h"])
-            x, y, w, h, e = l["x"], l["y"], l["w"], l["h"], edge(l)
-            # drips hanging off the bar (Slime's), on the side away from the
-            # edge: a little of them, so it looks like it does on screen
-            if any("drip" in str(d.get("namespace", "")).lower() for d in here):
-                if e == "top":
-                    h += 20
-                elif e == "bottom":
-                    y, h = y - 20, h + 20
-                elif e == "left":
-                    w += 20
-                else:
-                    x, w = x - 20, w + 20
-            return (int(x), int(y), int(w), int(h), e)
+            found = (l["x"], l["y"], l["w"], l["h"], edge(l))
+            break
+    if not found and bar_edge:
+        # a shell that draws its bar in a window of its own covering the
+        # screen (Omacale): the reserved strip along that edge
+        r = res[i_max]
+        found = {"left": (mx, my, r, mh), "top": (mx, my, mw, r),
+                 "right": (mx + mw - r, my, r, mh), "bottom": (mx, my + mh - r, mw, r)}[bar_edge] + (bar_edge,)
+    if found:
+        x, y, w, h, e = found
+        # drips hanging off the bar (Slime's), on the side away from the
+        # edge: a little of them, so it looks like it does on screen
+        if any("drip" in str(d.get("namespace", "")).lower() for d in here):
+            if e == "top":
+                h += 20
+            elif e == "bottom":
+                y, h = y - 20, h + 20
+            elif e == "left":
+                w += 20
+            else:
+                x, w = x - 20, w + 20
+        return (int(x), int(y), int(w), int(h), e)
     return None
 
 
