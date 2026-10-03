@@ -13,7 +13,8 @@ FocusScope {
 
   property var closeRequest: null
   property bool active: true
-  readonly property string script: Qt.resolvedUrl("shell_swapper.py").toString().replace("file://", "")
+  // (decoded: a folder name with a space in it is %20 in the URL)
+  readonly property string script: decodeURIComponent(Qt.resolvedUrl("shell_swapper.py").toString().replace(/^file:\/\//, ""))
 
   // ---- look: follows the Omarchy theme, like Taskchy -----------------------------
   readonly property color fg: Color.menu.text
@@ -86,7 +87,15 @@ FocusScope {
       out.push({ text: "Takes " + p.keys + (p.desc ? " (" + p.desc + ")" : "") + " out of the loadout." })
       if (p.backToBindings && p.backToBindings.length)
         out.push({ text: "It goes back into your bindings.lua (line " + p.backToBindings.join(", ") + ").", tone: "add" })
+      else if (p.dropFromBindings && p.dropFromBindings.length)
+        out.push({ text: "It was imported: its line in bindings.lua goes too (backed up first).", tone: "remove" })
       else if (p.activeNow) out.push({ text: "It stops working now: it's the shell you're using.", tone: "warn" })
+    }
+    if (p.deleted !== undefined || String(p.action || "").indexOf("delete ") === 0) {
+      var nb = (p.backToBindings || []).length, nd = (p.dropFromBindings || []).length
+      if (nb) out.push({ text: nb + " key" + (nb === 1 ? "" : "s") + " you moved into it go" + (nb === 1 ? "es" : "") + " back into your bindings.lua, for every shell (line " + p.backToBindings.join(", ") + ").", tone: "add" })
+      if (nd) out.push({ text: nd + " key" + (nd === 1 ? "" : "s") + " it imported " + (nd === 1 ? "is" : "are") + " taken out of bindings.lua (backed up first).", tone: "remove" })
+      out.push({ text: "The loadout itself goes to the trash (~/.local/state/shell-swapper/trash).", tone: "dim" })
     }
     if (p["import"]) {
       var take = p["import"].filter(function(r) { return r.status === "new" || r.status === "replace" })
@@ -143,7 +152,7 @@ FocusScope {
   }
   // run a command that may need your OK: its plan (exit 2) is shown first
   function planRun(args, done) {
-    if (planProc.running) return
+    if (planProc.running) { say("Still busy with the last one, try again in a moment.", true); return }
     planProc.args = args
     planProc.done = done || null
     planProc.command = ["python3", script].concat(args)
@@ -449,7 +458,7 @@ FocusScope {
   }
   function say(text, bad) { status = text; statusBad = !!bad; statusTimer.restart() }
   function run(args, done) {
-    if (actProc.running) return
+    if (actProc.running) { say("Still busy with the last one, try again in a moment.", true); return }
     actProc.done = done || null
     actProc.command = ["python3", script].concat(args)
     actProc.running = true
@@ -485,21 +494,35 @@ FocusScope {
     if (sel.l.active) { say("That's the shell you're using; swap to another one first.", true); return }
     if (armed !== sel.id) { armed = sel.id; say("Press d again to delete " + sel.name + " (it goes to the trash)."); return }
     armed = ""
-    run(["delete", sel.id], function(ok) { if (ok) say("Deleted " + sel.name) })
+    var name = sel.name
+    // asks first when it has keys to give back to bindings.lua
+    planRun(["delete", sel.id], function(ok) { if (ok) say("Deleted " + name) })
   }
   onCursorChanged: armed = ""
   onActiveChanged: { if (active) refresh(); else pictureIfAsked() }
 
-  Process {
-    id: listProc
-    command: ["python3", sw.script, "list"]
+  // A CLI call whose answer is JSON: `json(r)` with it parsed, `unreadable()`
+  // when it isn't, `failed(message)` for what it printed to stderr.
+  component Cli: Process {
+    id: cli
+    signal json(var r)
+    signal unreadable()
+    signal failed(string message)
     stdout: StdioCollector {
       onStreamFinished: {
-        try { sw.info = JSON.parse(text) } catch (e) { return }
-        sw.clampCursor()
+        var r
+        try { r = JSON.parse(text) } catch (e) { cli.unreadable(); return }
+        cli.json(r)
       }
     }
-    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
+    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") cli.failed(text.trim()) }
+  }
+
+  Cli {
+    id: listProc
+    command: ["python3", sw.script, "list"]
+    onJson: r => { sw.info = r; sw.clampCursor() }
+    onFailed: m => sw.say(m, true)
   }
   // swaps: exit 2 = its keys differ, ask which way
   Process {
@@ -541,22 +564,21 @@ FocusScope {
       sw.refresh(); sw.refreshScan()
     }
   }
-  Process {
+  Cli {
     id: actsProc
-    stdout: StdioCollector { onStreamFinished: { try { sw.acts = JSON.parse(text).actions || [] } catch (e) {} } }
-    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
+    onJson: r => sw.acts = r.actions || []
+    onFailed: m => sw.say(m, true)
   }
-  Process {
+  Cli {
     id: checkProc
-    stdout: StdioCollector { onStreamFinished: { try { sw.checkInfo = JSON.parse(text) } catch (e) { sw.checkInfo = null } } }
+    onJson: r => sw.checkInfo = r
+    onUnreadable: sw.checkInfo = null
   }
-  Process {
+  Cli {
     id: proposeProc
     property string label: ""
-    stdout: StdioCollector {
-      onStreamFinished: {
-        var r = null
-        try { r = JSON.parse(text) } catch (e) { return }
+    onFailed: m => sw.say(m, true)
+    onJson: r => {
         var lbl = proposeProc.label
         sw.review = {
           keys: r.keys, source: r.command, category: r.category,
@@ -568,38 +590,33 @@ FocusScope {
                      pick: p.candidates.length ? 0 : -1, on: p.candidates.length > 0 }
           })
         }
-      }
     }
-    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
   }
-  Process {
+  Cli {
     id: importCheckProc
-    stdout: StdioCollector { onStreamFinished: { try { sw.importCheck = JSON.parse(text) } catch (e) { sw.importCheck = null } } }
-    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
+    onJson: r => sw.importCheck = r
+    onUnreadable: sw.importCheck = null
+    onFailed: m => sw.say(m, true)
   }
-  Process {
+  Cli {
     id: findProc
-    stdout: StdioCollector {
-      onStreamFinished: {
-        var r = null
-        try { r = JSON.parse(text) } catch (e) { return }
+    onFailed: m => sw.say(m, true)
+    onJson: r => {
         sw.importFound = (r.files || []).length ? (r.binds.length + " found in " + r.files.map(function(f) { return f.split("/").pop() }).join(", "))
                                                  : "none found in " + (r.roots || []).map(function(x) { return x.replace(Quickshell.env("HOME") || "", "~") }).slice(0, 2).join(", ")
                                                    + ((r.roots || []).length > 2 ? " and " + ((r.roots || []).length - 2) + " more" : "")
         if (r.text) sw.importText = (sw.importText.trim() ? sw.importText.trim() + "\n" : "") + r.text
-      }
     }
-    stderr: StdioCollector { onStreamFinished: if (text.trim() !== "") sw.say(text.trim(), true) }
   }
-  Process {
+  Cli {
     id: tmplProc
     command: ["python3", sw.script, "keys", "templates"]
-    stdout: StdioCollector { onStreamFinished: { try { sw.tmpls = JSON.parse(text).templates || [] } catch (e) {} } }
+    onJson: r => sw.tmpls = r.templates || []
   }
-  Process {
+  Cli {
     id: scanProc
     command: ["python3", sw.script, "keys", "scan"]
-    stdout: StdioCollector { onStreamFinished: { try { sw.scan = JSON.parse(text).binds || [] } catch (e) {} } }
+    onJson: r => sw.scan = r.binds || []
   }
   Process {
     id: actProc

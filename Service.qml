@@ -15,7 +15,8 @@ Item {
   property var shell: null
   property var manifest: null
 
-  readonly property string script: Qt.resolvedUrl("shell_swapper.py").toString().replace("file://", "")
+  // (decoded: a folder name with a space in it is %20 in the URL)
+  readonly property string script: decodeURIComponent(Qt.resolvedUrl("shell_swapper.py").toString().replace(/^file:\/\//, ""))
   readonly property string pendingPath: Quickshell.env("HOME") + "/.local/state/shell-swapper/pending.json"
 
   // (for offscreen pictures of the question)
@@ -79,18 +80,32 @@ Item {
     onLoaded: svc.readPending(text())
     onLoadFailed: svc.pending = null
   }
-  // Look again: often while a swap is waiting (for the countdown), and once
-  // a second otherwise. A swap made while the shell is running (reload mode)
-  // signals over IPC, but that can land mid-reload and be lost; without this
-  // the question never came up and only the picker showed it.
+  // Look again: often while a swap is waiting (for the countdown), and every
+  // few seconds otherwise. The file is watched, and a swap made while the
+  // shell is running (reload mode) signals over IPC, but that can land
+  // mid-reload and be lost; this is the backstop for it (the swap waits for
+  // the question to be seen before its countdown starts).
   Timer {
-    interval: svc.pending !== null ? 500 : 1000
+    interval: svc.pending !== null ? 500 : 4000
     repeat: true
     running: true
     onTriggered: { svc.nowSec = Date.now() / 1000; pendingFile.reload() }
   }
   Process { id: seenProc; onExited: pendingFile.reload() }
-  Process { id: confirmProc; onExited: { pendingFile.reload(); pictureSoon.restart() } }
+  // If keeping it didn't work, the question comes back (the swap is still
+  // waiting, and would be undone at the deadline) and says why.
+  Process {
+    id: confirmProc
+    stderr: StdioCollector { id: confirmErr }
+    onExited: code => {
+      if (code !== 0) {
+        svc.answered = ""
+        Quickshell.execDetached(["notify-send", "-u", "critical", "-a", "Shell-Swapper", "Couldn't keep this shell",
+                                 (confirmErr.text.trim() || "shell-swapper confirm failed") + "\nTry again, or it goes back when the time runs out."])
+      } else pictureSoon.restart()
+      pendingFile.reload()
+    }
+  }
 
   // A picture of the bar for its loadout (the picker shows it): once a swap
   // is kept (the question gone from the screen), and at start-up if the
