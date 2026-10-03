@@ -92,7 +92,8 @@ o.bind("SUPER + CTRL + ALT + BACKSPACE", "Shell-Swapper rescue", "shell-swapper 
 | p | picture the bar of the shell you're using |
 | s | save the current shell as a new loadout (or update one by its name) |
 | r | rename the loadout |
-| d, d | delete it (to `~/.local/state/shell-swapper/trash/`) |
+| d, d | delete it (to `~/.local/state/shell-swapper/trash/`); keys you moved into it go back into `bindings.lua` |
+| , (or the ⚙ settings button, top right) | settings: the lock screen for every shell |
 | Esc | close |
 
 The right side shows the loadout's bar: a **picture** of it (in three
@@ -106,6 +107,16 @@ the bar: a fullscreen window, or a swap still asking. They live in
 `~/.local/state/shell-swapper/previews/`.
 Along the bottom: **apply by** *restart* (the sure way) or *reload* (Omarchy
 hot-reloads `shell.json`, no restart flash), and the keep-it timer.
+
+### Lock screen (settings)
+
+Only one lock screen can run, and it's the same in every shell: **Omarchy's
+own** by default. In the settings you can pick another lock screen plugin
+instead, such as [Lock Screen Explorer](https://github.com/SirJul1337/omarchy-lock-explorer)
+(offered to install if you don't have it). The pick switches over at once
+and stays on whichever shell you swap to, with its own settings, over a
+shell's own lock screen; picking Omarchy's goes back. Without a pick, a
+shell that brings its own lock screen uses it while it's on screen.
 
 ## Widgets stay on their own shell's bar
 
@@ -224,6 +235,8 @@ shell-swapper confirm | revert      # answer a waiting swap
 shell-swapper save "Work bar"       # the current shell, as a loadout
 shell-swapper rename ID NAME | delete ID
 shell-swapper config apply reload   # or restart; config confirmSeconds 30
+shell-swapper locks                 # the lock screens to choose from
+shell-swapper lock io.github.sirjul1337.lock-explorer   # the lock in every shell (omarchy.lock: the default)
 shell-swapper preview               # picture the bar on screen, for its loadout
 shell-swapper rescue
 

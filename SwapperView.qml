@@ -72,6 +72,12 @@ FocusScope {
     var out = [], home = Quickshell.env("HOME") || ""
     function short(f) { return home && String(f).indexOf(home) === 0 ? "~" + String(f).slice(home.length) : String(f) }
     function base(f) { return String(f).split("/").pop() }
+    // installing a plugin (a lock screen picked in the settings)
+    if (p.url) {
+      out.push({ text: "Installs it from " + p.url + ", the way Omarchy adds any plugin:" })
+      out.push({ text: "omarchy plugin add " + p.url + " --enable", tone: "code" })
+      out.push({ text: "Then it's the lock screen in every shell. Pick Omarchy's in the settings to go back.", tone: "dim" })
+    }
     if (p.lines && p.file) {
       out.push({ text: "Adds these lines to " + short(p.file) + ", after line " + p.afterLine + ":" })
       p.lines.forEach(function(l) { out.push({ text: l, tone: "code" }) })
@@ -185,6 +191,26 @@ FocusScope {
         { label: "Cancel", hint: "Esc", act: function() { closeAsk() } }
       ]
     }
+  }
+  // ---- settings (the gear, or ,): the lock screen for every shell ----
+  function openSettings() { if (!locksProc.running) locksProc.running = true }
+  function askSettings(r) {
+    var opts = r.options || []
+    var lines = [{ text: "Lock screen, the same in every shell. Omarchy's own is the default; the one picked here stays on whichever shell you swap to." }]
+    opts.forEach(function(o) {
+      lines.push({ text: (o.chosen ? "●  " : "○  ") + o.name + (o.suite ? "  (" + o.suite + "'s)" : "") + (o.installed ? "" : "  (not installed)")
+                   + (o.about ? "  ·  " + o.about : ""), tone: o.chosen ? "add" : "dim" })
+    })
+    var buttons = opts.map(function(o, i) {
+      return { label: o.installed ? o.name : "Install " + o.name, hint: String(i + 1), key: Qt.Key_1 + i, primary: o.chosen,
+               act: function() {
+                 closeAsk()
+                 if (o.chosen) return
+                 planRun(["lock", o.id], function(ok) { if (ok) say("Lock screen: " + o.name + ", in every shell.") })
+               } }
+    })
+    buttons.push({ label: "Close", hint: "Esc", act: function() { closeAsk() } })
+    ask = { title: "Settings", lines: lines, buttons: buttons }
   }
   function doSwap(id, name, flag) {
     var args = ["apply", id]
@@ -609,6 +635,12 @@ FocusScope {
     }
   }
   Cli {
+    id: locksProc
+    command: ["python3", sw.script, "locks"]
+    onJson: r => sw.askSettings(r)
+    onFailed: m => sw.say(m, true)
+  }
+  Cli {
     id: tmplProc
     command: ["python3", sw.script, "keys", "templates"]
     onJson: r => sw.tmpls = r.templates || []
@@ -730,6 +762,7 @@ FocusScope {
     else if (k === Qt.Key_R) startRename()
     else if (k === Qt.Key_D) del()
     else if (k === Qt.Key_B) openKeys()
+    else if (e.text === ",") openSettings()
     else if (k === Qt.Key_Escape) { if (armed) { armed = ""; status = "" } else if (closeRequest) closeRequest() }
     else return
     e.accepted = true
@@ -852,14 +885,24 @@ FocusScope {
   }
 
   // ---- layout -------------------------------------------------------------------------------
-  Text {
+  // settings: top right, like Taskchy's gear
+  Btn {
+    id: settingsBtn
     anchors.right: parent.right
+    y: 0
+    text: "\u2699 settings"
+    hint: ","
+    onClicked: sw.openSettings()
+  }
+  Text {
+    anchors.right: settingsBtn.left
+    anchors.rightMargin: 12
     y: sw.px(5)
     text: sw.mode === "keys" ? (sw.btab === "actions" ? "1-4 tabs  ↑↓ pick  / search  c key  ⏎ set  x clear  t other shells  esc back"
         : sw.btab === "templates" ? "1-4 tabs  ↑↓ pick  d forget  esc back"
         : sw.btab === "import" ? "1-4 tabs  e paste box  f find in its repo  i import  esc back"
         : "1-4 tabs  tab side  ↑↓ pick  space mark  m move in  d take out  o tidy  esc back")
-          : "↑↓ pick  ⏎ swap  k keybinds  v picture/sketch  p picture it  s save  r rename  d delete  esc close"
+          : "↑↓ pick  ⏎ swap  k keybinds  v picture/sketch  p picture it  s save  r rename  d delete  , settings  esc close"
     color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(10)
   }
   Column {

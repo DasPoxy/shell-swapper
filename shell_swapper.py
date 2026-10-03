@@ -36,6 +36,10 @@ Commands (all print JSON; errors go to stderr with exit status 1):
   delete ID                     (not the active one; keys moved into it go back
                                 into bindings.lua: plan first, --yes to do it)
   config [KEY VALUE]            settings: apply = restart | reload, confirmSeconds
+  locks                         the lock screens to choose from, and the one in use
+  lock ID                       use that lock screen in every shell (omarchy.lock,
+                                Omarchy's own, is the default; one not installed
+                                yet is installed first: plan first, --yes)
   preview [ID]                  picture the bar of the shell on screen, for its loadout
   check-new                     check bars installed since (a new one that's your bar
                                 now is saved as a loadout, as its installer set it up)
@@ -112,7 +116,16 @@ KEEP_BACKUPS = 20
 # before the shell's prompt is up (a restart takes a few seconds), and after
 SETTLE_SECONDS = 45
 GRACE_SECONDS = 2
-DEFAULT_CONFIG = {"apply": "restart", "confirmSeconds": 15}
+DEFAULT_CONFIG = {"apply": "restart", "confirmSeconds": 15, "lockScreen": ""}
+
+# Lock screens worth offering when they aren't installed (settings: lock screen)
+KNOWN_LOCKS = {
+    "io.github.sirjul1337.lock-explorer": {
+        "name": "Lock Screen Explorer",
+        "url": "https://github.com/SirJul1337/omarchy-lock-explorer.git",
+        "about": "dozens of lock screen designs, a picker and a designer",
+    },
+}
 
 # Only one notification server can run: whichever the suite wants wins, else
 # Omarchy's. (Slime's isn't a clone of Omarchy's, so it's named here.)
@@ -219,6 +232,8 @@ def config():
         c["confirmSeconds"] = max(5, min(120, int(c.get("confirmSeconds", 15))))
     except (TypeError, ValueError):
         c["confirmSeconds"] = 15
+    if not isinstance(c.get("lockScreen"), str):
+        c["lockScreen"] = ""
     return c
 
 
@@ -280,6 +295,95 @@ def owner(pid, all_suites):
             if pid.startswith(prefix):
                 return sid
     return None
+
+
+# Omarchy services you can pick a replacement for, for every shell, in the
+# settings: {service: config key}. Without a pick it's Omarchy's own.
+SETTABLE = {"omarchy.lock": "lockScreen"}
+
+
+def chosen_replacements(all_suites):
+    """{service: the replacement picked for it} (installed ones only)."""
+    c, out = config(), {}
+    groups = clone_groups(all_suites)
+    for src, key in SETTABLE.items():
+        pick = c.get(key) or ""
+        if pick == src or (pick and pick in groups.get(src, [])):
+            out[src] = pick
+    return out
+
+
+def lock_options():
+    """The lock screens to choose from: Omarchy's, every installed copy of it,
+    and known ones that aren't installed (to install)."""
+    all_suites = suites()
+    c = config()
+    pick = c.get("lockScreen") or "omarchy.lock"
+    installed = clone_groups(all_suites).get("omarchy.lock", [])
+    names = {pid: (m.get("name") or pid, m.get("description", "")) for pid, _, m in manifests()}
+    opts = [{"id": "omarchy.lock", "name": "Omarchy's lock screen", "about": "the default", "installed": True,
+             "chosen": pick == "omarchy.lock" or pick not in installed}]
+    for pid in installed:
+        own = owner(pid, all_suites)
+        opts.append({"id": pid, "name": names.get(pid, (pid, ""))[0], "about": names.get(pid, ("", ""))[1],
+                     "installed": True, "chosen": pick == pid,
+                     "suite": all_suites[own]["name"] if own else ""})
+    for pid, k in KNOWN_LOCKS.items():
+        if pid not in installed:
+            opts.append({"id": pid, "name": k["name"], "about": k["about"], "installed": False, "chosen": False,
+                         "url": k["url"]})
+    return {"lockScreen": pick, "options": opts}
+
+
+def plugin_cmd(*args):
+    """omarchy plugin ARGS (tests: SHELL_SWAPPER_PLUGIN_CMD)."""
+    base = shlex.split(os.environ.get("SHELL_SWAPPER_PLUGIN_CMD", "omarchy plugin"))
+    if not base:
+        return 0
+    return subprocess.call(base + list(args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def set_lock(pid, yes=False):
+    """Use `pid` as the lock screen in every shell (omarchy.lock: Omarchy's,
+    the default): saved in the settings, so every swap keeps it, and switched
+    to now. One that isn't installed but is known is installed first (asks)."""
+    with Lock():
+        opts = lock_options()["options"]
+        o = next((x for x in opts if x["id"] == pid), None)
+        if o is None:
+            raise Fail(f"'{pid}' isn't a lock screen Shell-Swapper knows (see shell-swapper locks)")
+        if not o["installed"]:
+            plan = {"action": "install " + o["name"] + " and use it as the lock screen in every shell",
+                    "url": o["url"], "note": "it's added with: omarchy plugin add " + o["url"] + " --enable"}
+            if not yes:
+                raise NeedsYes(plan)
+            if plugin_cmd("add", o["url"], "--enable", "--yes") != 0:
+                raise Fail("installing " + o["name"] + " didn't work (try: omarchy plugin add " + o["url"] + ")")
+            global _MANIFESTS
+            _MANIFESTS = None
+        c = config()
+        c["lockScreen"] = "" if pid == "omarchy.lock" else pid
+        write_json(CONFIG, c)
+        # now: what a swap to the shell you're in would leave on, for the lock
+        # screens, by the same rule (compose), switched with Omarchy's own
+        # commands so the shell picks it up
+        all_suites, cur = suites(), shell_config()
+        act = loadouts().get(status().get("active", ""))
+        target = act if act and act.get("suite") == bar_id(cur) else snapshot(cur, "", bar_id(cur))
+        new = compose(cur, target, all_suites)
+
+        def is_on(cfg, n):
+            return n not in (cfg.get("disabledPlugins") or []) and (
+                n.startswith("omarchy.") or any(entry_id(p) == n for p in cfg.get("plugins") or []))
+        group = clone_groups(all_suites).get("omarchy.lock", []) + ["omarchy.lock"]
+        on_now = [n for n in group if is_on(new, n)]
+        others = [n for n in group if is_on(cur, n) and n not in on_now]
+        for n in on_now:
+            if not is_on(cur, n):
+                plugin_cmd("enable", n)
+        for n in others:
+            plugin_cmd("disable", n)
+        return {"lockScreen": pid, "name": o["name"], "on": on_now, "switchedOff": others}
 
 
 def ruled_ids(all_suites):
@@ -514,17 +618,19 @@ def compose(cur, target, all_suites):
     for pid in r["disable"]:
         disable(pid)
     # one of each Omarchy service and the copies that replace it (its
-    # notifications, lock screen, OSD): the one the suite asks for, else one
-    # you installed for every shell (no suite's: your choice wins over a
-    # suite's own), else the suite's own copy, else Omarchy's own. Another
-    # suite's copy never carries over.
+    # notifications, lock screen, OSD): the one you chose for every shell
+    # (settings: lock screen), else the one the suite asks for, else the
+    # suite's own copy, else, for services with no setting, one that's no
+    # suite's, else Omarchy's own. Another suite's copy never carries over.
+    chosen = chosen_replacements(all_suites)
     def on(n):
         return n not in disabled and (n.startswith("omarchy.") or any(entry_id(p) == n for p in plugins))
     for src, members in clone_groups(all_suites).items():
         group = members + [src]
-        keep = ([n for n in group if n in r["enable"]]
-                + [n for n in members if owner(n, all_suites) is None and on(n)]
+        keep = ([chosen[src]] if src in chosen else
+                [n for n in group if n in r["enable"]]
                 + [n for n in members if owner(n, all_suites) == suite and on(n)]
+                + ([n for n in members if owner(n, all_suites) is None and on(n)] if src not in SETTABLE else [])
                 + [src])[0]
         for n in group:
             if n == keep:
@@ -2778,6 +2884,12 @@ def run(argv):
                     n["dismissed"] = True
             write_json(NOTICES, notes)
         return {"dismissed": rest[0] if rest else "all"}
+    if cmd == "locks":
+        return lock_options()
+    if cmd == "lock":
+        if not rest:
+            raise Fail("lock ID (see shell-swapper locks; omarchy.lock is Omarchy's own)")
+        return set_lock(rest[0], "--yes" in rest)
     if cmd == "widgets":
         # widgets [ID]: other shells' widgets and missing ones, on a loadout's bar (or all)
         all_suites, outs, inst = suites(), loadouts(), installed_ids()

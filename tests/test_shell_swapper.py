@@ -98,30 +98,68 @@ class Compose(unittest.TestCase):
         self.assertTrue(on(new, "shell-swapper"))
 
 
-class GlobalReplacement(unittest.TestCase):
-    """A lock screen plugin installed for every shell (no suite's) wins over
-    a suite's own lock, everywhere, and isn't saved into loadouts."""
+class LockChoice(unittest.TestCase):
+    """Omarchy's lock is the default; a lock screen picked in the settings is
+    the one in every shell (over a suite's own), and stays a global plugin."""
     def setUp(self):
         plugin("someone.lockscreen", ["service", "overlay"], omarchy={"clonedFrom": "omarchy.lock"})
         ss._MANIFESTS = None
         self.suites = ss.suites()
+        self.calls = os.path.join(HOME, "plugin-calls")
+        os.environ["SHELL_SWAPPER_PLUGIN_CMD"] = f"sh -c 'echo \"$*\" >> {self.calls}' plugin"
+        if os.path.exists(ss.CONFIG):
+            os.remove(ss.CONFIG)
 
     def tearDown(self):
         import shutil
         shutil.rmtree(os.path.join(HOME, ".config/omarchy/plugins/someone.lockscreen"))
+        os.environ.pop("SHELL_SWAPPER_PLUGIN_CMD", None)
+        if os.path.exists(ss.CONFIG):
+            os.remove(ss.CONFIG)
         ss._MANIFESTS = None
 
-    def test_one_lock_and_it_is_yours(self):
+    def locks_on(self, cfg):
+        return [p for p in ("omarchy.lock", "acme.lock", "someone.lockscreen") if on(cfg, p)]
+
+    def test_default_is_omarchys(self):
+        cur = {"bar": {"id": "omarchy.bar"}, "plugins": [{"id": "someone.lockscreen"}], "disabledPlugins": ["omarchy.lock"]}
+        self.assertEqual(self.locks_on(ss.compose(cur, OTHER, self.suites)), ["omarchy.lock"])
+        self.assertEqual(self.locks_on(ss.compose(cur, ACME, self.suites)), ["acme.lock"], "a suite's own, if it has one")
+
+    def test_picked_lock_everywhere(self):
+        with open(ss.SHELL_JSON, "w") as f:
+            json.dump({"bar": {"id": "other.bar"}, "plugins": [], "disabledPlugins": []}, f)
+        ss.set_status(active="")
+        r = ss.set_lock("someone.lockscreen")
+        self.assertEqual(ss.config()["lockScreen"], "someone.lockscreen")
+        self.assertEqual(r["on"], ["someone.lockscreen"])
+        with open(self.calls) as f:
+            calls = f.read().split("\n")
+        self.assertIn("enable someone.lockscreen", calls)
+        self.assertIn("disable omarchy.lock", calls)
         cur = {"bar": {"id": "omarchy.bar"}, "plugins": [{"id": "someone.lockscreen", "favorites": ["zen"]}],
                "disabledPlugins": ["omarchy.lock"]}
         for target in (ACME, OTHER):
             new = ss.compose(cur, target, self.suites)
-            ons = [p for p in ("omarchy.lock", "acme.lock", "someone.lockscreen") if on(new, p)]
-            self.assertEqual(ons, ["someone.lockscreen"], target["name"])
+            self.assertEqual(self.locks_on(new), ["someone.lockscreen"], target["name"])
             kept = [p for p in new["plugins"] if ss.entry_id(p) == "someone.lockscreen"]
             self.assertEqual(kept[0].get("favorites"), ["zen"], "its settings come along")
             cur = new
         self.assertNotIn("someone.lockscreen", [ss.entry_id(p) for p in ss.snapshot(cur, "x", "acme.bar")["plugins"]])
+        ss.set_lock("omarchy.lock")
+        self.assertEqual(ss.config()["lockScreen"], "")
+        self.assertEqual(self.locks_on(ss.compose(cur, OTHER, self.suites)), ["omarchy.lock"])
+
+    def test_options(self):
+        o = ss.lock_options()
+        ids = [x["id"] for x in o["options"]]
+        self.assertEqual(ids[0], "omarchy.lock")
+        self.assertIn("someone.lockscreen", ids)
+        self.assertIn("io.github.sirjul1337.lock-explorer", ids, "known, offered to install")
+        with self.assertRaises(ss.NeedsYes):
+            ss.set_lock("io.github.sirjul1337.lock-explorer")
+        with self.assertRaises(ss.Fail):
+            ss.set_lock("not.a.lock")
 
 
 class Ownership(unittest.TestCase):
