@@ -57,8 +57,9 @@ Item {
 
     BorderSurface {
       id: card
-      width: Math.min(Style.space(940), panel.width - Style.gapsOut * 2 - 60)
-      height: Math.min(Style.space(600), panel.height - Style.gapsOut * 2 - 60)
+      // wide enough for the title and the key hints on one line
+      width: Math.min(Style.space(1180), panel.width - Style.gapsOut * 2 - 60)
+      height: Math.min(Style.space(680), panel.height - Style.gapsOut * 2 - 60)
       anchors.centerIn: parent
       radius: Style.cornerRadius
       color: view.solid

@@ -898,6 +898,10 @@ FocusScope {
     anchors.right: settingsBtn.left
     anchors.rightMargin: 12
     y: sw.px(5)
+    // never over the title: cut short ("…") when the panel is narrow
+    width: Math.max(0, Math.min(implicitWidth, settingsBtn.x - 12 - titleRow.implicitWidth - 24))
+    horizontalAlignment: Text.AlignRight
+    elide: Text.ElideRight
     text: sw.mode === "keys" ? (sw.btab === "actions" ? "1-4 tabs  ↑↓ pick  / search  c key  ⏎ set  x clear  t other shells  esc back"
         : sw.btab === "templates" ? "1-4 tabs  ↑↓ pick  d forget  esc back"
         : sw.btab === "import" ? "1-4 tabs  e paste box  f find in its repo  i import  esc back"
@@ -910,6 +914,7 @@ FocusScope {
     width: parent.width
     spacing: 4
     Row {
+      id: titleRow
       spacing: 10
       Text { text: "Shell-Swapper"; color: sw.fg; font.family: sw.font; font.pixelSize: sw.px(18); font.bold: true }
       Text {
