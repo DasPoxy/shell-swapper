@@ -84,9 +84,26 @@ class Compose(unittest.TestCase):
                 ons = [p for p in ("omarchy." + svc, "acme." + svc) if on(new, p)]
                 self.assertEqual(ons, ["omarchy." + svc], f"{target['name']}: {svc}")
 
+    def test_snapshot_keeps_only_what_swaps_use(self):
+        cfg = {"bar": {"id": "acme.bar"}, "plugins": [{"id": "taskchy", "setting": 1}, {"id": "acme.lock"}],
+               "disabledPlugins": ["omarchy.lock", "something.else"]}
+        snap = ss.snapshot(cfg, "Acme", "acme.bar")
+        self.assertEqual(snap["plugins"], [{"id": "acme.lock"}])
+        self.assertEqual(snap["disabledPlugins"], ["omarchy.lock"])
+
     def test_shell_swapper_stays_on(self):
         new = ss.compose({"bar": {}, "plugins": [], "disabledPlugins": ["shell-swapper"]}, ACME, self.suites)
         self.assertTrue(on(new, "shell-swapper"))
+
+
+class Ownership(unittest.TestCase):
+    def test_prefixes(self):
+        owns = lambda sid: ss.rules(sid, {})["owns"]
+        self.assertEqual(owns("acme.bar"), ["acme."])
+        self.assertEqual(owns("hancore.shibumi.bar"), ["hancore.shibumi."])
+        self.assertEqual(owns("io.github.someone.bar"), [], "not every plugin that author made")
+        self.assertEqual(owns("com.example.bar"), [])
+        self.assertEqual(owns("io.github.someone.cool-shell.bar"), ["io.github.someone.cool-shell."])
 
 
 class Imports(unittest.TestCase):
@@ -129,6 +146,49 @@ class KeepKeys(unittest.TestCase):
         ss.apply("other", confirm=False, keys="keep")
         left = [b for b in ss.parse_binds(ss.read_text(ss.KEYS_FILE)) if b["kind"] == "bind"]
         self.assertEqual(left, [], "neither the old shell's keys nor the new one's")
+
+
+class ImportKeys(unittest.TestCase):
+    def test_import_writes_what_was_reviewed(self):
+        os.makedirs(os.path.dirname(ss.BINDINGS), exist_ok=True)
+        with open(ss.BINDINGS, "w") as f:
+            f.write('o.bind("SUPER + A", "mine", "a")\n')
+        ss.save_loadout("imp", {"name": "Imp", "suite": "acme.bar", "bar": {"id": "acme.bar"}, "plugins": []})
+        ss.set_status(active="")
+        text = ('o.bind("SUPER + K", "Panel", "omarchy-shell acme panel")\n'
+                'o.bind("SUPER + K", "Again", "omarchy-shell acme other")\n'
+                'o.bind("SUPER + Q", "x", (function() return "y" end)())\n')
+        with self.assertRaises(ss.NeedsYes):
+            ss.import_keys("imp", text, yes=False)
+        ss.import_keys("imp", text, yes=True)
+        kb = ss.get_loadout("imp")["keybinds"]
+        self.assertEqual([(b["keys"], b["lua"]) for b in kb],
+                         [("SUPER + K", 'o.bind("SUPER + K", "Panel", "omarchy-shell acme panel")')])
+        self.assertIn('--[shell-swapper:imp] o.bind("SUPER + K", "Panel"', ss.read_text(ss.BINDINGS))
+
+
+class Delete(unittest.TestCase):
+    def test_keys_go_back(self):
+        os.makedirs(os.path.dirname(ss.BINDINGS), exist_ok=True)
+        with open(ss.BINDINGS, "w") as f:
+            f.write("\n".join(['o.bind("SUPER + A", "mine", "a")', ""]
+                              + ss.group_heading("Gone", "gone")
+                              + ['--[shell-swapper:gone] o.bind("SUPER + R", "moved", "r")',
+                                 '--[shell-swapper:gone] o.bind("SUPER + I", "imported", "i")', ""]))
+        ss.save_loadout("gone", {"name": "Gone", "suite": "acme.bar", "bar": {"id": "acme.bar"}, "plugins": [],
+                                 "keybinds": [{"keys": "SUPER + R", "desc": "moved", "lua": "", "from": "bindings.lua"},
+                                              {"keys": "SUPER + I", "desc": "imported", "lua": "", "from": "import"}]})
+        ss.set_status(active="")
+        with self.assertRaises(ss.NeedsYes) as plan:
+            ss.delete_loadout("gone", yes=False)
+        self.assertEqual((len(plan.exception.plan["backToBindings"]), len(plan.exception.plan["dropFromBindings"])), (1, 1))
+        self.assertTrue(os.path.exists(ss.loadout_path("gone")), "nothing done without --yes")
+        ss.delete_loadout("gone", yes=True)
+        text = ss.read_text(ss.BINDINGS)
+        keys = [b["keys"] for b in ss.parse_binds(text) if b["kind"] == "bind"]
+        self.assertEqual(keys, ["SUPER + A", "SUPER + R"])
+        self.assertNotIn("shell-swapper:gone", text)
+        self.assertFalse(os.path.exists(ss.loadout_path("gone")))
 
 
 if __name__ == "__main__":

@@ -33,7 +33,8 @@ Commands (all print JSON; errors go to stderr with exit status 1):
                                 the shell (bind it to a key: it works even when
                                 the bar doesn't come up)
   rename ID NAME
-  delete ID                     (not the active one)
+  delete ID                     (not the active one; keys moved into it go back
+                                into bindings.lua: plan first, --yes to do it)
   config [KEY VALUE]            settings: apply = restart | reload, confirmSeconds
   preview [ID]                  picture the bar of the shell on screen, for its loadout
   check-new                     check bars installed since (a new one that's your bar
@@ -191,12 +192,7 @@ def read_json(path, default=None):
 
 def write_json(path, data):
     """Atomic: a temp file in the same folder, then a rename."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp, path)
+    write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 class Lock:
@@ -259,7 +255,13 @@ def rules(suite_id, all_suites=None):
     if own:
         r.update({k: v for k, v in own.items() if k in ("enable", "disable", "owns", "layout")})
     if not r["owns"] and "." in suite_id and suite_id != "omarchy.bar":
-        r["owns"] = [suite_id.rsplit(".", 1)[0] + "."]
+        prefix = suite_id.rsplit(".", 1)[0] + "."
+        # a reverse-domain author namespace (io.github.someone.bar) holds the
+        # author's other plugins too: those aren't claimed unless the bar's
+        # manifest says so (shellSwapper.owns)
+        if not re.match(r"(io|com|org|net|dev|app|me|co|xyz)\.[^.]+\.$", prefix) and \
+                not re.match(r"(io|com|org|net|dev|app|me|co|xyz)\.github\.[^.]+\.$", prefix):
+            r["owns"] = [prefix]
     elif not r["owns"] and suite_id != "omarchy.bar":
         # no dot (celestune-bar): its name without the "bar" part
         base = re.sub(r"[-_]?bar$", "", suite_id)
@@ -349,6 +351,18 @@ def loadouts():
     return out
 
 
+def get_loadout(lid, outs=None):
+    """A loadout by id, or Fail. Pass `outs` (loadouts()) to look in that."""
+    d = (loadouts() if outs is None else outs).get(check_id(lid))
+    if d is None:
+        raise Fail(f"no loadout '{lid}'")
+    return d
+
+
+def loadout_names():
+    return {lid: d.get("name", lid) for lid, d in loadouts().items()}
+
+
 def status():
     return read_json(STATUS, {}) or {}
 
@@ -360,10 +374,19 @@ def set_status(**kw):
 
 
 def snapshot(cfg, name, suite_id):
+    """A loadout of the shell in `cfg`: its bar, and only the plugins a swap
+    takes from a loadout (a suite's own, the services suites switch on and
+    off). Global ones (Taskchy, your theme manager...) and their settings
+    stay in shell.json, whatever the loadout."""
+    all_suites = suites()
+    ruled = ruled_ids(all_suites)
+
+    def follows(pid):
+        return owner(pid, all_suites) is not None or pid in ruled
     return {"name": name, "suite": suite_id, "saved": now(),
             "bar": copy.deepcopy(cfg.get("bar") or {}),
-            "plugins": copy.deepcopy(cfg.get("plugins") or []),
-            "disabledPlugins": list(cfg.get("disabledPlugins") or [])}
+            "plugins": [copy.deepcopy(p) for p in cfg.get("plugins") or [] if follows(entry_id(p))],
+            "disabledPlugins": [d for d in cfg.get("disabledPlugins") or [] if follows(str(d))]}
 
 
 def unique_id(name, taken):
@@ -946,7 +969,7 @@ def organize_keys(yes):
         text = read_text(BINDINGS)
         if text is None:
             raise Fail(f"can't read {BINDINGS}")
-        names = {lid: d.get("name", lid) for lid, d in loadouts().items()}
+        names = loadout_names()
         new = organize_text(text, names)
         if new == text:
             return {"organized": False, "already": True}
@@ -971,8 +994,7 @@ def move_keys(lid, picks, yes):
     there (tagged, so they can come back), with any hl.unbind of the same key."""
     with Lock():
         outs = loadouts()
-        if check_id(lid) not in outs:
-            raise Fail(f"no loadout '{lid}'")
+        get_loadout(lid, outs)
         if not hook_file():
             raise Fail("loadout keys aren't loaded yet: set that up first (shell-swapper keys hook)")
         text = read_text(BINDINGS)
@@ -1014,7 +1036,7 @@ def move_keys(lid, picks, yes):
         d["keybinds"] = (d.get("keybinds") or []) + [
             {"keys": b["keys"], "desc": b["desc"], "lua": b["lua"], "from": "bindings.lua"} for b in picked]
         save_loadout(lid, d)
-        names = {x: y.get("name", x) for x, y in loadouts().items()}
+        names = loadout_names()
         write_text(BINDINGS, organize_text(text, names))
         if active and hook_file():
             write_keys(keys_plan(d)["text"])
@@ -1022,54 +1044,62 @@ def move_keys(lid, picks, yes):
         return dict(plan, moved=True)
 
 
+def release_keys(text, lid, keys=None, imported=()):
+    """bindings.lua with loadout `lid`'s tagged lines let go: back to plain
+    lines, except keys Shell-Swapper imported (`imported`: they were never
+    yours), which are dropped. Only the key combos in `keys`, or all of them;
+    lines an import replaced come back with it. Returns (text, back, dropped):
+    the 1-based first lines of what came back and of what went."""
+    tags = (MOVED_TAG.format(lid), f"--[shell-swapper:{lid}:replaced] ")
+    lines, drop, back, gone, i = text.split("\n"), set(), [], [], 0
+    while i < len(lines):
+        t = next((x for x in tags if lines[i].startswith(x)), None)
+        info = classify(lines[i][len(t):]) if t else None
+        if not info:
+            i += 1
+            continue
+        # the statement's first line, then the rest of it (tagged lines that
+        # don't start a statement of their own)
+        span, j = [i], i + 1
+        while j < len(lines) and lines[j].startswith(t) and not classify(lines[j][len(t):]):
+            span.append(j)
+            j += 1
+        if keys is None or info["keys"] in keys:
+            if t == tags[0] and info["keys"] in imported:
+                drop.update(span)   # Shell-Swapper added it: it goes (backed up), not into every shell
+                gone.append(i + 1)
+            else:
+                for x in span:
+                    lines[x] = lines[x][len(t):]
+                back.append(i + 1)
+        i = j
+    return "\n".join(l for x, l in enumerate(lines) if x not in drop), back, gone
+
+
 def remove_key(lid, idx, yes):
     """Take a key out of a loadout. If it came from bindings.lua, it goes back
     there (un-commented)."""
     with Lock():
-        outs = loadouts()
-        if check_id(lid) not in outs:
-            raise Fail(f"no loadout '{lid}'")
-        d = outs[lid]
+        d = get_loadout(lid)
         binds = d.get("keybinds") or []
         if not 0 <= idx < len(binds):
             raise Fail(f"no key {idx} in {lid}")
         b = binds[idx]
         text = read_text(BINDINGS) or ""
-        tag = MOVED_TAG.format(lid)
-        back = [i for i, l in enumerate(text.split("\n"))
-                if l.startswith(tag) and (classify(l[len(tag):]) or {}).get("keys") == b["keys"]]
+        imported = {b["keys"]} if b.get("from") == "import" else set()
+        new_text, back, gone = release_keys(text, lid, {b["keys"]}, imported)
         active = status().get("active", "") == lid
-        imported = b.get("from") == "import"
         plan = {"action": "take " + b["keys"] + " out of " + d.get("name", lid), "loadout": lid,
-                "keys": b["keys"], "desc": b.get("desc", ""),
-                "backToBindings": [] if imported else [i + 1 for i in back],
-                "dropFromBindings": [i + 1 for i in back] if imported else [],
+                "keys": b["keys"], "desc": b.get("desc", ""), "backToBindings": back, "dropFromBindings": gone,
                 "activeNow": active, "backupTo": KEY_BACKUPS}
-        live = active or back
+        live = active or back or gone
         if live and not yes:
             raise NeedsYes(plan)
         d["keybinds"] = binds[:idx] + binds[idx + 1:]
         save_loadout(lid, d)
-        if back:
+        if back or gone:
             key_backup(BINDINGS)
-            lines = text.split("\n")
-            drop = set()
-            for i in back:
-                # the statement's first line, then the rest of it (tagged
-                # lines that don't start a statement of their own)
-                span = [i]
-                j = i + 1
-                while j < len(lines) and lines[j].startswith(tag) and not classify(lines[j][len(tag):]):
-                    span.append(j)
-                    j += 1
-                for x in span:
-                    if imported:
-                        drop.add(x)   # Shell-Swapper added it: it goes (backed up), not into every shell
-                    else:
-                        lines[x] = lines[x][len(tag):]
-            lines = [l for x, l in enumerate(lines) if x not in drop]
-            names = {x: y.get("name", x) for x, y in loadouts().items()}
-            write_text(BINDINGS, organize_text("\n".join(lines), names))
+            write_text(BINDINGS, organize_text(new_text, loadout_names()))
         if active and hook_file():
             write_keys(keys_plan(d)["text"])
         if live:
@@ -1077,11 +1107,44 @@ def remove_key(lid, idx, yes):
         return dict(plan, removed=True)
 
 
+def delete_loadout(lid, yes):
+    """Delete a loadout (into the trash). Keys moved into it from bindings.lua
+    go back there as they were; ones it imported go (backed up first)."""
+    with Lock():
+        d = get_loadout(lid)
+        if lid == status().get("active"):
+            raise Fail("that's the shell you're using; swap to another one first")
+        name = d.get("name", lid)
+        text = read_text(BINDINGS) or ""
+        imported = {b["keys"] for b in d.get("keybinds") or [] if b.get("from") == "import"}
+        new_text, back, gone = release_keys(text, lid, None, imported)
+        plan = {"action": "delete " + name, "loadout": lid, "backToBindings": back, "dropFromBindings": gone,
+                "note": "keys moved into it go back into bindings.lua (for every shell)" if back else "",
+                "backupTo": KEY_BACKUPS}
+        if (back or gone) and not yes:
+            raise NeedsYes(plan)
+        if back or gone:
+            # its group heading becomes a plain note: the keys under it are yours again
+            lines = []
+            for l in new_text.split("\n"):
+                m = GROUP_RE.match(l)
+                if m and m.group(2) == lid:
+                    lines.append(f"-- Keys that were in the {name} loadout (deleted {now()})")
+                elif not (l.startswith(HEAD_MORE) and lines and lines[-1].startswith(("-- Keys that were in", HEAD_MORE))):
+                    lines.append(l)
+            key_backup(BINDINGS)
+            write_text(BINDINGS, organize_text("\n".join(lines), {k: v for k, v in loadout_names().items() if k != lid}))
+            hypr_reload()
+        trash = os.path.join(STATE, "trash")
+        os.makedirs(trash, exist_ok=True)
+        os.replace(loadout_path(lid), os.path.join(trash, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + lid + ".json"))
+        return dict(plan, deleted=lid)
+
+
 def add_key(lid, lua, yes):
     with Lock():
         outs = loadouts()
-        if check_id(lid) not in outs:
-            raise Fail(f"no loadout '{lid}'")
+        get_loadout(lid, outs)
         info = classify(lua)
         if not info or info["kind"] != "bind":
             raise Fail("that isn't a bind: o.bind(\"KEYS\", \"what it does\", \"command\") or hl.bind(...)")
@@ -1216,18 +1279,11 @@ def suite_plugins(sid, all_suites):
     for Omarchy: its first-party plugins)."""
     out = {}
     r = rules(sid, all_suites)
-    for base in PLUGIN_DIRS:
-        for mf in glob.glob(os.path.join(base, "*", "manifest.json")):
-            m = read_json(mf, None)
-            if not isinstance(m, dict):
-                continue
-            pid = str(m.get("id") or "")
-            if not pid or pid in out:
-                continue
-            mine = any(pid.startswith(p) for p in r["owns"]) if r["owns"] else \
-                (sid == "omarchy.bar" and base == PLUGIN_DIRS[1])
-            if mine:
-                out[pid] = {"dir": os.path.realpath(os.path.dirname(mf)), "manifest": m}
+    for pid, d, m in manifests():
+        mine = any(pid.startswith(p) for p in r["owns"]) if r["owns"] else \
+            (sid == "omarchy.bar" and os.path.dirname(d) == PLUGIN_DIRS[1])
+        if mine:
+            out[pid] = {"dir": os.path.realpath(d), "manifest": m}
     return out
 
 
@@ -1242,9 +1298,7 @@ def actions_for(lid_or_suite, show_all=False):
     if lid_or_suite.startswith("suite:"):
         sid, lout = lid_or_suite[6:], None
     else:
-        lout = outs.get(check_id(lid_or_suite))
-        if lout is None:
-            raise Fail(f"no loadout '{lid_or_suite}'")
+        lout = get_loadout(lid_or_suite, outs)
         sid = lout.get("suite", "")
     if sid not in all_suites:
         raise Fail(f"{sid} isn't installed")
@@ -1401,9 +1455,8 @@ def set_many(items, yes):
         mine = {b["keys"]: b["line"] for b in user_binds()}
         changes, touched, unchanged = [], {}, []
         for it in items:
-            lid = check_id(str(it.get("loadout", "")))
-            if lid not in outs:
-                raise Fail(f"no loadout '{lid}'")
+            lid = str(it.get("loadout", ""))
+            get_loadout(lid, outs)
             k = norm_keys(it.get("keys", ""))
             cmd = str(it.get("command", "")).strip()
             if not k or not cmd or "<" in cmd:
@@ -1418,8 +1471,7 @@ def set_many(items, yes):
             new_lua = bind_lua(k, desc, cmd)
             replaced = [b for b in old if (b["keys"] == k or cmd == bind_command(b["lua"])) and b["lua"] != new_lua]
             old = [b for b in old if b["lua"] != new_lua]
-            d["keybinds"] = [b for b in old if b not in replaced] + [
-                {"keys": k, "desc": desc, "lua": bind_lua(k, desc, cmd)}]
+            d["keybinds"] = [b for b in old if b not in replaced] + [{"keys": k, "desc": desc, "lua": new_lua}]
             changes.append({"loadout": lid, "loadoutName": d.get("name", lid), "keys": k, "desc": desc,
                             "command": cmd, "replaces": [{"keys": b["keys"], "desc": b.get("desc", "")} for b in replaced],
                             "clashLine": mine.get(k, 0), "activeNow": lid == active})
@@ -1706,13 +1758,20 @@ def parse_import(text, prose=True):
 
 
 def import_plan(lid, text):
+    return _import(lid, text)[0]
+
+
+def _import(lid, text):
+    """The plan for importing `text` into loadout `lid`, and each key's Lua
+    (the first of a key in the text, as the plan says)."""
     outs = loadouts()
-    if check_id(lid) not in outs:
-        raise Fail(f"no loadout '{lid}'")
-    d = outs[lid]
+    d = get_loadout(lid, outs)
     have = d.get("keybinds") or []
     mine = {b["keys"]: b["line"] for b in user_binds()}
     found, skipped = parse_import(text)
+    lua = {}
+    for f in found:
+        lua.setdefault(f["keys"], f["lua"])
     rows, seen = [], set()
     for f in found:
         if f["keys"] in seen:
@@ -1738,26 +1797,22 @@ def import_plan(lid, text):
     return {"action": "import keys into " + d.get("name", lid), "loadout": lid, "loadoutName": d.get("name", lid),
             "import": [{k: r.get(k, "") for k in ("keys", "desc", "command", "status", "why", "from", "clashLine")}
                        for r in rows],
-            "skipped": skipped, "activeNow": status().get("active", "") == lid, "backupTo": KEY_BACKUPS}
+            "skipped": skipped, "activeNow": status().get("active", "") == lid, "backupTo": KEY_BACKUPS}, lua
 
 
 def import_keys(lid, text, yes):
     with Lock():
-        plan = import_plan(lid, text)
+        plan, lua = _import(lid, text)
         take = [r for r in plan["import"] if r["status"] in ("new", "replace")]
         if not take:
             return dict(plan, nothing=True)
         if not yes:
             raise NeedsYes(plan)
-        outs = loadouts()
-        d = outs[lid]
-        found = {}
-        for f in parse_import(text)[0]:
-            found.setdefault(f["keys"], f)   # the first of a key in the paste wins, as the preview says
+        d = get_loadout(lid)
         keys = {r["keys"] for r in take}
         replaced = [b for b in d.get("keybinds") or [] if b["keys"] in keys]
         d["keybinds"] = [b for b in d.get("keybinds") or [] if b["keys"] not in keys] + [
-            {"keys": r["keys"], "desc": r["desc"], "lua": found[r["keys"]]["lua"], "from": "import"} for r in take]
+            {"keys": r["keys"], "desc": r["desc"], "lua": lua[r["keys"]], "from": "import"} for r in take]
         save_loadout(lid, d)
         # bindings.lua: the new keys, tagged, into the shell's group; a key
         # they replace keeps its line, marked as replaced (never deleted)
@@ -1770,8 +1825,8 @@ def import_keys(lid, text, yes):
                 lines[i] = f"--[shell-swapper:{lid}:replaced] " + l[len(tag):]
         while lines and not lines[-1].strip():
             lines.pop()
-        lines += [""] + [tag_lines(found[r["keys"]]["lua"], lid) for r in take] + [""]
-        names = {x: y.get("name", x) for x, y in loadouts().items()}
+        lines += [""] + [tag_lines(lua[r["keys"]], lid) for r in take] + [""]
+        names = loadout_names()
         write_text(BINDINGS, organize_text("\n".join(lines), names))
         if plan["activeNow"] and hook_file():
             write_keys(keys_plan(d)["text"])
@@ -1890,9 +1945,7 @@ def find_keys(lid, remote=True, repo_override=""):
     """Binds a shell recommends, from its own checkout: READMEs, docs,
     scripts and code comments; only ones that call that shell."""
     all_suites, outs = suites(), loadouts()
-    d = outs.get(check_id(lid))
-    if d is None:
-        raise Fail(f"no loadout '{lid}'")
+    d = get_loadout(lid, outs)
     sid = d.get("suite", "")
     marks = shell_targets(sid, all_suites)
     roots = set()
@@ -2119,9 +2172,7 @@ def take_off_widgets(lid, ids, yes):
     """Take widgets off a loadout's bar (only the bar: its plugins stay)."""
     with Lock():
         all_suites, outs = suites(), loadouts()
-        d = outs.get(check_id(lid))
-        if d is None:
-            raise Fail(f"no loadout '{lid}'")
+        d = get_loadout(lid, outs)
         rep = widget_report(d, all_suites, installed_ids())
         if not ids:
             ids = [w["id"] for w in rep["foreign"]]
@@ -2163,9 +2214,7 @@ def strip_foreign(lid, yes):
     """Take other shells' widgets and plugins out of a loadout."""
     with Lock():
         all_suites, outs = suites(), loadouts()
-        d = outs.get(check_id(lid))
-        if d is None:
-            raise Fail(f"no loadout '{lid}'")
+        d = get_loadout(lid, outs)
         sid = d.get("suite", "")
         lay = (d.get("bar") or {}).get("layout") or {}
         widgets = [entry_id(e) for sec in lay.values() for e in sec or [] if owner(entry_id(e), all_suites) not in (None, sid)]
@@ -2297,8 +2346,7 @@ def take_preview(lid=None, if_missing=False):
         outs, st = loadouts(), status()
         active = st.get("active", "")
         lid = lid or active
-        if check_id(lid) not in outs:
-            raise Fail(f"no loadout '{lid}'")
+        get_loadout(lid, outs)
         p = outs[lid].get("preview")
         if if_missing and isinstance(p, dict) and os.path.exists(p.get("path", "")):
             return {"preview": p, "loadout": lid, "already": True}
@@ -2348,8 +2396,7 @@ def backups_listing():
 def restore_loadout(lid, name, yes):
     with Lock():
         outs = loadouts()
-        if check_id(lid) not in outs:
-            raise Fail(f"no loadout '{lid}'")
+        get_loadout(lid, outs)
         src = os.path.normpath(os.path.join(LOADOUT_BACKUPS, lid, os.path.basename(name)))
         d = read_json(src, None)
         if not isinstance(d, dict):
@@ -2450,10 +2497,7 @@ def target_for(arg, all_suites, outs):
     """A loadout (by id), or a suite's default: "suite:<bar id>"."""
     if arg.startswith("suite:"):
         return None, fresh_loadout(arg[6:], all_suites)
-    check_id(arg)
-    if arg not in outs:
-        raise Fail(f"no loadout '{arg}'")
-    t = outs[arg]
+    t = get_loadout(arg, outs)
     if t.get("suite") and t["suite"] not in all_suites:
         raise Fail(f"loadout '{arg}' needs the {t['suite']} plugin, which isn't installed")
     return arg, t
@@ -2800,24 +2844,14 @@ def run(argv):
             raise Fail("rename ID NAME")
         with Lock():
             outs = loadouts()
-            if check_id(rest[0]) not in outs:
-                raise Fail(f"no loadout '{rest[0]}'")
-            d = outs[rest[0]]
+            d = get_loadout(rest[0], outs)
             d["name"] = " ".join(rest[1:]).strip() or d.get("name", rest[0])
             save_loadout(rest[0], d)
             return {"renamed": rest[0], "name": d["name"]}
     if cmd == "delete":
         if not rest:
             raise Fail("delete ID")
-        with Lock():
-            if check_id(rest[0]) == status().get("active"):
-                raise Fail("that's the shell you're using; swap to another one first")
-            if not os.path.exists(loadout_path(rest[0])):
-                raise Fail(f"no loadout '{rest[0]}'")
-            trash = os.path.join(STATE, "trash")
-            os.makedirs(trash, exist_ok=True)
-            os.replace(loadout_path(rest[0]), os.path.join(trash, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + rest[0] + ".json"))
-            return {"deleted": rest[0]}
+        return delete_loadout(rest[0], "--yes" in rest)
     if cmd == "config":
         c = config()
         if len(rest) >= 2:
@@ -2861,9 +2895,7 @@ def keys_cmd(rest):
     if sub == "list":
         if len(args) < 2:
             raise Fail("keys list ID")
-        d = loadouts().get(check_id(args[1]))
-        if d is None:
-            raise Fail(f"no loadout '{args[1]}'")
+        d = get_loadout(args[1])
         plan = keys_plan(d)
         clash = {c["keys"] for c in plan["conflicts"]}
         return {"loadout": args[1], "keys": [dict(i=i, keys=b["keys"], desc=b.get("desc", ""), lua=b["lua"],
@@ -2872,9 +2904,7 @@ def keys_cmd(rest):
     if sub == "diff":
         if len(args) < 2:
             raise Fail("keys diff ID")
-        d = loadouts().get(check_id(args[1]))
-        if d is None:
-            raise Fail(f"no loadout '{args[1]}'")
+        d = get_loadout(args[1])
         plan = keys_plan(d)
         return {k: plan[k] for k in ("changes", "add", "remove", "conflicts")}
     if sub == "move":
