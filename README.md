@@ -177,10 +177,11 @@ the file goes away). Swapping writes that file, never your `bindings.lua`.
 
 - **Nothing changes without asking.** Setting up that one line, moving keys
   in or out, and a swap whose keys differ from the ones you have all show you
-  exactly what would change first. A swap asks *Swap keys too / Keep my keys
-  / Cancel*.
+  exactly what would change first. A swap asks *Swap keys too / Only my keys
+  / Cancel*; "only my keys" means just your `bindings.lua`, so none of the
+  shell you're leaving stays bound.
 - **Everything is backed up first.** `bindings.lua`, `hyprland.lua` and the
-  keys file are copied to `~/.local/state/shell-swapper/keybind-backups/`
+  keys file are copied to `~/.local/state/shell-swapper/backups/keys/`
   before every write (the last 40). Going back from a swap, and rescue, put
   the keys back too.
 - **Moving keys in** (b, then pick keys from your `bindings.lua` with space

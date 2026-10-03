@@ -48,7 +48,8 @@ Commands (all print JSON; errors go to stderr with exit status 1):
 Keys (a loadout's own keybinds, in hypr/shell_swapper.lua; your bindings.lua
 is only touched when you move keys in or out, and always backed up first):
   apply ... --keys | --keep-keys   when the loadout's keys differ from the ones
-                                you have: bring them too, or keep yours
+                                you have: bring them too, or only your own
+                                (bindings.lua; no shell's keys at all)
   keys status                   the hook, the keys live now, recent backups
   keys hook                     add the one line that loads loadout keys
   keys scan                     the binds in your bindings.lua (line numbers)
@@ -113,24 +114,51 @@ GRACE_SECONDS = 2
 DEFAULT_CONFIG = {"apply": "restart", "confirmSeconds": 15}
 
 # Only one notification server can run: whichever the suite wants wins, else
-# Omarchy's.
+# Omarchy's. (Slime's isn't a clone of Omarchy's, so it's named here.)
 NOTIFIERS = ["omarchy.notifications", "slime.notifications"]
 
+_MANIFESTS = None
 
-def notifiers():
-    """Every notification server: NOTIFIERS plus installed clones of Omarchy's
-    (a manifest with "omarchy": {"clonedFrom": "omarchy.notifications"}, e.g.
-    synoptik.notifications), clones first so a loadout that turned one on keeps it."""
-    clones = []
-    for base in PLUGIN_DIRS:
-        for mf in sorted(glob.glob(os.path.join(base, "*", "manifest.json"))):
-            m = read_json(mf, None)
-            meta = m.get("omarchy") if isinstance(m, dict) else None
-            pid = str(m.get("id") or "") if isinstance(m, dict) else ""
-            if (pid and isinstance(meta, dict) and meta.get("clonedFrom") == "omarchy.notifications"
-                    and pid not in NOTIFIERS and pid not in clones):
-                clones.append(pid)
-    return clones + NOTIFIERS
+
+def manifests():
+    """Every installed plugin's manifest, by id: [(id, folder, manifest)], your
+    plugin folder first (its copy wins over Omarchy's). Read once per run."""
+    global _MANIFESTS
+    if _MANIFESTS is None:
+        out, seen = [], set()
+        for base in PLUGIN_DIRS:
+            for mf in sorted(glob.glob(os.path.join(base, "*", "manifest.json"))):
+                m = read_json(mf, None)
+                pid = str(m.get("id") or "") if isinstance(m, dict) else ""
+                if pid and pid not in seen:
+                    seen.add(pid)
+                    out.append((pid, os.path.dirname(mf), m))
+        _MANIFESTS = out
+    return _MANIFESTS
+
+
+def clone_groups(all_suites):
+    """Omarchy services and the suite copies that replace them, of which only
+    one may run: {source: [replacements]}, e.g. omarchy.lock: [synoptik.lock].
+    A copy is a manifest with "omarchy": {"clonedFrom": SOURCE}. Only copies a
+    suite owns count (a copy you added for every shell is yours, and stays as
+    you set it), except for notifications: one server, whoever's it is. Bar
+    widget copies don't count: they run fine beside Omarchy's."""
+    groups = {"omarchy.notifications": [n for n in NOTIFIERS if n != "omarchy.notifications"]}
+    for pid, _, m in manifests():
+        meta = m.get("omarchy")
+        src = str(meta.get("clonedFrom") or "") if isinstance(meta, dict) else ""
+        if not src.startswith("omarchy.") or "bar" in (m.get("kinds") or []) or src == "omarchy.bar":
+            continue
+        if src == "omarchy.notifications" or owner(pid, all_suites):
+            members = groups.setdefault(src, [])
+            if pid not in members:
+                members.insert(0, pid)
+    # only services that can't run twice: Omarchy's original is an installed
+    # plugin and not a bar widget (widget copies sit happily beside it)
+    kinds = {pid: m.get("kinds") or [] for pid, _, m in manifests()}
+    return {src: ms for src, ms in groups.items()
+            if ms and (src == "omarchy.notifications" or (src in kinds and "bar-widget" not in kinds[src]))}
 
 # What a suite brings and switches off, for suites that don't say so
 # themselves (a bar plugin's manifest can carry a "shellSwapper" object with
@@ -211,16 +239,10 @@ def shell_config():
 def suites():
     """Installed bar plugins, by id (your plugin folder wins over Omarchy's)."""
     found = {}
-    for base in PLUGIN_DIRS:
-        for mf in sorted(glob.glob(os.path.join(base, "*", "manifest.json"))):
-            m = read_json(mf, None)
-            if not isinstance(m, dict) or "bar" not in (m.get("kinds") or []):
-                continue
-            sid = str(m.get("id") or "")
-            if not sid or sid in found:
-                continue
+    for sid, d, m in manifests():
+        if "bar" in (m.get("kinds") or []):
             found[sid] = {"id": sid, "name": m.get("name") or sid, "description": m.get("description", ""),
-                          "dir": os.path.dirname(mf), "manifest": m}
+                          "dir": d, "manifest": m}
     if "omarchy.bar" not in found:   # always there, even if the folder moved
         found["omarchy.bar"] = {"id": "omarchy.bar", "name": "Omarchy", "description": "Omarchy's own bar",
                                 "dir": os.path.join(OMARCHY, "shell/plugins/bar"), "manifest": {}}
@@ -261,7 +283,9 @@ def owner(pid, all_suites):
 
 def ruled_ids(all_suites):
     """Plugins some suite switches on or off: they follow the loadout too."""
-    out = set(notifiers())
+    out = set(NOTIFIERS)
+    for src, members in clone_groups(all_suites).items():
+        out.update([src] + members)
     for sid in all_suites:
         r = rules(sid, all_suites)
         out.update(r["enable"])
@@ -465,17 +489,23 @@ def compose(cur, target, all_suites):
         enable(pid)
     for pid in r["disable"]:
         disable(pid)
-    # one notification server: the suite's, else whichever the loadout has on,
-    # else Omarchy's
-    servers = notifiers()
-    wanted = [n for n in servers if n in r["enable"]]
-    on = [n for n in servers if n not in disabled and (n.startswith("omarchy.") or any(entry_id(p) == n for p in plugins))]
-    keep = (wanted or on or ["omarchy.notifications"])[0]
-    for n in servers:
-        if n == keep:
-            enable(n)
-        elif n not in disabled and (n.startswith("omarchy.") or any(entry_id(p) == n for p in plugins)):
-            disable(n)
+    # one of each Omarchy service and the suite copies that replace it (its
+    # notifications, lock screen, OSD): the one the suite asks for, else its
+    # own copy, else one that's no suite's, else Omarchy's own. Another
+    # suite's copy never carries over.
+    def on(n):
+        return n not in disabled and (n.startswith("omarchy.") or any(entry_id(p) == n for p in plugins))
+    for src, members in clone_groups(all_suites).items():
+        group = members + [src]
+        keep = ([n for n in group if n in r["enable"]]
+                + [n for n in members if owner(n, all_suites) == suite and on(n)]
+                + [n for n in members if owner(n, all_suites) is None and on(n)]
+                + [src])[0]
+        for n in group:
+            if n == keep:
+                enable(n)
+            elif on(n):
+                disable(n)
     # Shell-Swapper itself stays on, so it can ask (and so you can swap back)
     disabled = [d for d in disabled if d != SELF_ID]
     if not any(entry_id(p) == SELF_ID for p in plugins):
@@ -1282,12 +1312,41 @@ def actions_for(lid_or_suite, show_all=False):
             "categories": [{"id": c[0], "name": c[1]} for c in CATEGORIES]}
 
 
+def lua_text(lit):
+    """The text of one Lua string literal."""
+    if lit.startswith("[["):
+        return lit[2:-2]
+    return re.sub(r"\\(.)", r"\1", lit[1:-1])
+
+
 def bind_command(lua):
-    """What a bind runs: its last string (o.bind's command, or the one in
-    hl.dsp.exec_cmd(...))."""
+    """What a bind runs: the string in hl.dsp.exec_cmd(...) if it has one,
+    else its last string (o.bind's command; an options table after it, like
+    { description = ... }, doesn't count)."""
+    m = re.search(r"hl\.dsp\.exec_cmd\(\s*(" + LUA_STR_RE.pattern + r")\s*\)", lua, re.S)
+    if m:
+        return lua_text(m.group(1))
+    lua = re.sub(r",\s*\{[^{}]*\}\s*\)\s*$", ")", lua)
     strs = re.findall(r"""\[\[(.*?)\]\]|"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'""", lua, re.S)
     vals = [next(g for g in t if g != "") if any(t) else "" for t in strs]
     return vals[-1].replace('\\"', '"') if vals else ""
+
+
+# A Lua string literal: "...", '...' or [[...]] (a [==[ long string is left
+# unmatched on purpose, so a bind using one isn't taken as plain).
+LUA_STR_RE = re.compile(r"""\[\[.*?\]\]|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'""", re.S)
+# A bind whose arguments are only text: o.bind("KEYS", "what", "command"),
+# hl.bind("KEYS", hl.dsp.exec_cmd("command"), { description = "what" })...
+PLAIN_BIND_RE = re.compile(r"""^(?:o\.bind|o\.bind_toggle|hl\.bind)\((?:S,)*(?:S|hl\.dsp\.exec_cmd\(S\))"""
+                           r"""(?:,\{(?:\w+=(?:S|true|false|\d+),?)*\})?\)$""")
+
+
+def plain_bind(stmt):
+    """True when every argument of a bind is plain text (or exec_cmd of text,
+    or a table of plain options): nothing in it can run as Lua code when
+    Hyprland loads its config."""
+    skeleton = re.sub(r"\s+", "", LUA_STR_RE.sub("S", stmt))
+    return bool(PLAIN_BIND_RE.match(skeleton))
 
 
 def lua_str(s):
@@ -1605,10 +1664,20 @@ def parse_import(text, prose=True):
         info = classify(stmt)
         if not info or info["kind"] != "bind" or not info["keys"]:
             continue
-        one = re.sub(r"\s*\n\s*", " ", stmt)        # one line, as it'll be written
-        found.append({"keys": info["keys"], "desc": info["desc"], "command": bind_command(one), "lua": one,
-                      "from": stmt.split("\n")[0][:120]})
+        one = re.sub(r"\s*\n\s*", " ", stmt)
         spans.append((m.start(), i))
+        if not plain_bind(one):
+            # what you'd review (keys, what, command) must be all that's written:
+            # a bind with code in its arguments could run more than that
+            skipped.append({"line": stmt.split("\n")[0][:120],
+                            "why": "only plain binds come in: its arguments must be quoted text"})
+            continue
+        cmd = bind_command(one)
+        dm = re.search(r"description\s*=\s*(" + LUA_STR_RE.pattern + ")", one, re.S)
+        desc = info["desc"] or (lua_text(dm.group(1)) if dm else "") or cmd
+        # written from the parts you see, never as found
+        found.append({"keys": info["keys"], "desc": desc, "command": cmd,
+                      "lua": bind_lua(info["keys"], desc, cmd), "from": stmt.split("\n")[0][:120]})
     found += prose_found
     # every bind, however it was written: a combo Hyprland can bind, a command
     good = []
@@ -2424,17 +2493,23 @@ def apply(arg, confirm=True, keys=None):
         new = compose(cur, target, all_suites)
         kplan = keys_plan(target) if hook_file() else None
         keys_change = bool(kplan and kplan["changes"])
+        if keys_change and keys == "keep":
+            # only your own keys (bindings.lua): no shell's keys at all, rather
+            # than the old shell's left calling a shell that isn't running
+            old_keys = [b for b in parse_binds(read_text(KEYS_FILE) or "") if b["kind"] == "bind"]
+            kplan = dict(kplan, text=render_keys(target.get("name", lid), []))
+            keys_change = bool(old_keys)
         if keys_change and keys is None:
             if created:
                 os.remove(loadout_path(lid))
             raise NeedsYes({"action": "swap to " + target.get("name", lid), "loadout": arg,
                             "keys": {k: kplan[k] for k in ("add", "remove", "conflicts")},
-                            "choose": "--keys (its keys come too) or --keep-keys (yours stay as they are)"})
-        if new == cur and not (keys_change and keys == "swap"):
+                            "choose": "--keys (its keys come too) or --keep-keys (only your bindings.lua keys)"})
+        if new == cur and not keys_change:
             set_status(active=lid)
             return {"applied": lid, "changed": False}
         bpath = backup(cur)   # before anything changes: shell.json, keys, bindings.lua
-        kinfo = write_keys(kplan["text"]) if keys_change and keys == "swap" else None
+        kinfo = write_keys(kplan["text"]) if keys_change else None
         if not os.path.exists(LAST_GOOD):
             write_json(LAST_GOOD, cur)
         write_json(SHELL_JSON, new)

@@ -1,0 +1,135 @@
+"""Tests for shell_swapper.py, in a throwaway home: fake plugins, no shell
+restarts, no Hyprland. Run: python3 -m unittest discover -s tests"""
+import json
+import os
+import sys
+import tempfile
+import unittest
+
+HOME = tempfile.mkdtemp(prefix="shell-swapper-test-")
+OMARCHY = os.path.join(HOME, "omarchy")
+os.environ.update({
+    "HOME": HOME, "OMARCHY_PATH": OMARCHY,
+    # nothing real gets restarted, reloaded or asked
+    "SHELL_SWAPPER_RESTART": "", "SHELL_SWAPPER_RELOAD": "", "SHELL_SWAPPER_CHECK": "",
+    "SHELL_SWAPPER_HYPR_RELOAD": "", "SHELL_SWAPPER_LOCKED": "false",
+    "SHELL_SWAPPER_PLUGIN_LIST": os.path.join(HOME, "no-plugin-list.json"),
+})
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import shell_swapper as ss  # noqa: E402
+
+
+def plugin(pid, kinds, base="user", **extra):
+    d = os.path.join(HOME, ".config/omarchy/plugins" if base == "user" else "omarchy/shell/plugins", pid)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "manifest.json"), "w") as f:
+        json.dump(dict({"id": pid, "name": pid, "kinds": kinds}, **extra), f)
+
+
+# Omarchy's own services, and a suite ("acme") that replaces three of them
+plugin("omarchy.bar", ["bar"], base="omarchy")
+for p in ("notifications", "lock"):
+    plugin("omarchy." + p, ["service"], base="omarchy")
+plugin("omarchy.osd", ["panel"], base="omarchy")
+plugin("omarchy.audio", ["bar-widget"], base="omarchy")
+plugin("acme.bar", ["bar"])
+plugin("acme.notifications", ["service"], omarchy={"clonedFrom": "omarchy.notifications"})
+plugin("acme.lock", ["service"], omarchy={"clonedFrom": "omarchy.lock"})
+plugin("acme.osd", ["panel"], omarchy={"clonedFrom": "omarchy.osd"})
+plugin("acme.audio", ["bar-widget"], omarchy={"clonedFrom": "omarchy.audio"})
+plugin("other.bar", ["bar"])
+plugin("taskchy", ["overlay"])
+
+
+def on(cfg, pid):
+    dis = cfg.get("disabledPlugins") or []
+    listed = any(ss.entry_id(p) == pid for p in cfg.get("plugins") or [])
+    return pid not in dis and (pid.startswith("omarchy.") or listed)
+
+
+ACME = {"name": "Acme", "suite": "acme.bar", "bar": {"id": "acme.bar"},
+        "plugins": [{"id": "acme.notifications"}, {"id": "acme.lock"}, {"id": "acme.osd"}],
+        "disabledPlugins": ["omarchy.notifications", "omarchy.lock", "omarchy.osd"]}
+# an older loadout saved while acme's lock was on for everything
+OTHER = {"name": "Other", "suite": "other.bar", "bar": {"id": "other.bar"},
+         "plugins": [{"id": "acme.lock"}], "disabledPlugins": ["omarchy.lock"]}
+
+
+class Compose(unittest.TestCase):
+    def setUp(self):
+        ss._MANIFESTS = None
+        self.suites = ss.suites()
+
+    def test_groups(self):
+        g = ss.clone_groups(self.suites)
+        self.assertEqual(g["omarchy.lock"], ["acme.lock"])
+        self.assertEqual(g["omarchy.osd"], ["acme.osd"])
+        self.assertIn("acme.notifications", g["omarchy.notifications"])
+        self.assertNotIn("omarchy.audio", g, "bar widget copies run beside Omarchy's")
+
+    def test_into_the_suite(self):
+        cur = {"bar": {"id": "omarchy.bar"}, "plugins": [{"id": "taskchy"}], "disabledPlugins": []}
+        new = ss.compose(cur, ACME, self.suites)
+        for svc in ("notifications", "lock", "osd"):
+            self.assertTrue(on(new, "acme." + svc), svc)
+            self.assertFalse(on(new, "omarchy." + svc), svc)
+        self.assertTrue(on(new, "taskchy"), "global plugins stay")
+
+    def test_out_of_the_suite_always_one_lock(self):
+        cur = ss.compose({"bar": {"id": "omarchy.bar"}, "plugins": [], "disabledPlugins": []}, ACME, self.suites)
+        for target in (OTHER, {"name": "Omarchy", "suite": "omarchy.bar", "bar": {"id": "omarchy.bar"},
+                               "plugins": [], "disabledPlugins": []}):
+            new = ss.compose(cur, target, self.suites)
+            for svc in ("notifications", "lock", "osd"):
+                ons = [p for p in ("omarchy." + svc, "acme." + svc) if on(new, p)]
+                self.assertEqual(ons, ["omarchy." + svc], f"{target['name']}: {svc}")
+
+    def test_shell_swapper_stays_on(self):
+        new = ss.compose({"bar": {}, "plugins": [], "disabledPlugins": ["shell-swapper"]}, ACME, self.suites)
+        self.assertTrue(on(new, "shell-swapper"))
+
+
+class Imports(unittest.TestCase):
+    def test_plain_binds_rebuilt(self):
+        found, _ = ss.parse_import('o.bind("SUPER + R", "Launcher", [[omarchy-shell acme toggle]])\n'
+                                   'hl.bind("SUPER + B", hl.dsp.exec_cmd("omarchy-shell acme bar"), { description = "Bar" })',
+                                   prose=False)
+        self.assertEqual([f["lua"] for f in found],
+                         ['o.bind("SUPER + R", "Launcher", "omarchy-shell acme toggle")',
+                          'o.bind("SUPER + B", "Bar", "omarchy-shell acme bar")'])
+
+    def test_code_in_arguments_refused(self):
+        for bad in ('o.bind("SUPER + Q", "x", (function() os.execute("touch /tmp/p") return "a" end)())',
+                    'o.bind("SUPER + Q", "x", "a" .. os.getenv("HOME"))',
+                    'hl.bind("SUPER + Q", hl.dsp.exec_cmd(os.getenv("X")))'):
+            found, skipped = ss.parse_import(bad, prose=False)
+            self.assertEqual(found, [], bad)
+            self.assertTrue(any("plain" in s["why"] for s in skipped), bad)
+
+    def test_bind_command(self):
+        self.assertEqual(ss.bind_command('hl.bind("A", hl.dsp.exec_cmd("cmd x"), { description = "d" })'), "cmd x")
+        self.assertEqual(ss.bind_command('o.bind("A", "d", "omarchy-shell shell toggle t \'{}\'")'),
+                         "omarchy-shell shell toggle t '{}'")
+
+
+class KeepKeys(unittest.TestCase):
+    def test_only_my_keys_clears_the_old_shells(self):
+        ss._MANIFESTS = None
+        hypr = os.path.join(HOME, ".config/hypr")
+        os.makedirs(hypr, exist_ok=True)
+        with open(os.path.join(hypr, "hyprland.lua"), "w") as f:
+            f.write("\n".join(ss.HOOK) + "\n")
+        with open(ss.KEYS_FILE, "w") as f:
+            f.write(ss.render_keys("Acme", [{"keys": "SUPER + R", "lua": 'o.bind("SUPER + R", "L", "omarchy-shell acme go")'}]))
+        with open(ss.SHELL_JSON, "w") as f:
+            json.dump({"bar": {"id": "acme.bar"}, "plugins": [], "disabledPlugins": []}, f)
+        ss.save_loadout("other", dict(OTHER, keybinds=[{"keys": "SUPER + X", "desc": "x",
+                                                         "lua": 'o.bind("SUPER + X", "x", "omarchy-shell other x")'}]))
+        ss.set_status(active="")
+        ss.apply("other", confirm=False, keys="keep")
+        left = [b for b in ss.parse_binds(ss.read_text(ss.KEYS_FILE)) if b["kind"] == "bind"]
+        self.assertEqual(left, [], "neither the old shell's keys nor the new one's")
+
+
+if __name__ == "__main__":
+    unittest.main()

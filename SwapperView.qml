@@ -166,13 +166,13 @@ FocusScope {
     ;(k.add || []).forEach(function(a) { lines.push({ text: "+  " + a.keys + "   " + (a.desc || ""), tone: "add" }) })
     ;(k.remove || []).forEach(function(r) { lines.push({ text: "−  " + r.keys + "   " + (r.desc || ""), tone: "remove" }) })
     ;(k.conflicts || []).forEach(function(c) { lines.push({ text: "!  " + c.keys + " is bound in your bindings.lua too (line " + c.line + "): left out", tone: "warn" }) })
-    lines.push({ text: "Your bindings.lua isn't touched either way. The keys file is backed up first, and going back puts it back.", tone: "dim" })
+    lines.push({ text: "Only my keys: no shell's keys at all, just your bindings.lua (nothing from the shell you're leaving stays on). Your bindings.lua isn't touched either way; the keys file is backed up first, and going back puts it back.", tone: "dim" })
     ask = {
       title: "Swap to " + name + "?",
       lines: lines,
       buttons: [
         { label: "Swap keys too", hint: "Enter", primary: true, act: function() { closeAsk(); doSwap(id, name, "--keys") } },
-        { label: "Keep my keys", hint: "k", key: Qt.Key_K, act: function() { closeAsk(); doSwap(id, name, "--keep-keys") } },
+        { label: "Only my keys", hint: "k", key: Qt.Key_K, act: function() { closeAsk(); doSwap(id, name, "--keep-keys") } },
         { label: "Cancel", hint: "Esc", act: function() { closeAsk() } }
       ]
     }
