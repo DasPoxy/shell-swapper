@@ -139,22 +139,21 @@ def manifests():
 
 
 def clone_groups(all_suites):
-    """Omarchy services and the suite copies that replace them, of which only
-    one may run: {source: [replacements]}, e.g. omarchy.lock: [synoptik.lock].
-    A copy is a manifest with "omarchy": {"clonedFrom": SOURCE}. Only copies a
-    suite owns count (a copy you added for every shell is yours, and stays as
-    you set it), except for notifications: one server, whoever's it is. Bar
-    widget copies don't count: they run fine beside Omarchy's."""
+    """Omarchy services and the copies that replace them, of which only one may
+    run: {source: [replacements]}, e.g. omarchy.lock: [a lock screen plugin].
+    A copy is a manifest with "omarchy": {"clonedFrom": SOURCE}: a suite's own
+    (synoptik.notifications) or one no suite owns, that you installed for every
+    shell (a lock screen plugin). Bar widget copies don't count: they run fine
+    beside Omarchy's."""
     groups = {"omarchy.notifications": [n for n in NOTIFIERS if n != "omarchy.notifications"]}
     for pid, _, m in manifests():
         meta = m.get("omarchy")
         src = str(meta.get("clonedFrom") or "") if isinstance(meta, dict) else ""
         if not src.startswith("omarchy.") or "bar" in (m.get("kinds") or []) or src == "omarchy.bar":
             continue
-        if src == "omarchy.notifications" or owner(pid, all_suites):
-            members = groups.setdefault(src, [])
-            if pid not in members:
-                members.insert(0, pid)
+        members = groups.setdefault(src, [])
+        if pid not in members:
+            members.insert(0, pid)
     # only services that can't run twice: Omarchy's original is an installed
     # plugin and not a bar widget (widget copies sit happily beside it)
     kinds = {pid: m.get("kinds") or [] for pid, _, m in manifests()}
@@ -286,8 +285,10 @@ def owner(pid, all_suites):
 def ruled_ids(all_suites):
     """Plugins some suite switches on or off: they follow the loadout too."""
     out = set(NOTIFIERS)
+    # a group's Omarchy service and the suites' copies follow the loadout; a
+    # copy no suite owns is yours, global like your other plugins
     for src, members in clone_groups(all_suites).items():
-        out.update([src] + members)
+        out.update([src] + [m for m in members if owner(m, all_suites)])
     for sid in all_suites:
         r = rules(sid, all_suites)
         out.update(r["enable"])
@@ -512,17 +513,18 @@ def compose(cur, target, all_suites):
         enable(pid)
     for pid in r["disable"]:
         disable(pid)
-    # one of each Omarchy service and the suite copies that replace it (its
-    # notifications, lock screen, OSD): the one the suite asks for, else its
-    # own copy, else one that's no suite's, else Omarchy's own. Another
+    # one of each Omarchy service and the copies that replace it (its
+    # notifications, lock screen, OSD): the one the suite asks for, else one
+    # you installed for every shell (no suite's: your choice wins over a
+    # suite's own), else the suite's own copy, else Omarchy's own. Another
     # suite's copy never carries over.
     def on(n):
         return n not in disabled and (n.startswith("omarchy.") or any(entry_id(p) == n for p in plugins))
     for src, members in clone_groups(all_suites).items():
         group = members + [src]
         keep = ([n for n in group if n in r["enable"]]
-                + [n for n in members if owner(n, all_suites) == suite and on(n)]
                 + [n for n in members if owner(n, all_suites) is None and on(n)]
+                + [n for n in members if owner(n, all_suites) == suite and on(n)]
                 + [src])[0]
         for n in group:
             if n == keep:
