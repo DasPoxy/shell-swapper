@@ -116,6 +116,22 @@ DEFAULT_CONFIG = {"apply": "restart", "confirmSeconds": 15}
 # Omarchy's.
 NOTIFIERS = ["omarchy.notifications", "slime.notifications"]
 
+
+def notifiers():
+    """Every notification server: NOTIFIERS plus installed clones of Omarchy's
+    (a manifest with "omarchy": {"clonedFrom": "omarchy.notifications"}, e.g.
+    synoptik.notifications), clones first so a loadout that turned one on keeps it."""
+    clones = []
+    for base in PLUGIN_DIRS:
+        for mf in sorted(glob.glob(os.path.join(base, "*", "manifest.json"))):
+            m = read_json(mf, None)
+            meta = m.get("omarchy") if isinstance(m, dict) else None
+            pid = str(m.get("id") or "") if isinstance(m, dict) else ""
+            if (pid and isinstance(meta, dict) and meta.get("clonedFrom") == "omarchy.notifications"
+                    and pid not in NOTIFIERS and pid not in clones):
+                clones.append(pid)
+    return clones + NOTIFIERS
+
 # What a suite brings and switches off, for suites that don't say so
 # themselves (a bar plugin's manifest can carry a "shellSwapper" object with
 # the same keys, which wins):
@@ -245,7 +261,7 @@ def owner(pid, all_suites):
 
 def ruled_ids(all_suites):
     """Plugins some suite switches on or off: they follow the loadout too."""
-    out = set(NOTIFIERS)
+    out = set(notifiers())
     for sid in all_suites:
         r = rules(sid, all_suites)
         out.update(r["enable"])
@@ -451,10 +467,11 @@ def compose(cur, target, all_suites):
         disable(pid)
     # one notification server: the suite's, else whichever the loadout has on,
     # else Omarchy's
-    wanted = [n for n in NOTIFIERS if n in r["enable"]]
-    on = [n for n in NOTIFIERS if n not in disabled and (n.startswith("omarchy.") or any(entry_id(p) == n for p in plugins))]
+    servers = notifiers()
+    wanted = [n for n in servers if n in r["enable"]]
+    on = [n for n in servers if n not in disabled and (n.startswith("omarchy.") or any(entry_id(p) == n for p in plugins))]
     keep = (wanted or on or ["omarchy.notifications"])[0]
-    for n in NOTIFIERS:
+    for n in servers:
         if n == keep:
             enable(n)
         elif n not in disabled and (n.startswith("omarchy.") or any(entry_id(p) == n for p in plugins)):
