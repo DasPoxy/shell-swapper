@@ -2057,6 +2057,9 @@ def check_suite(sid, all_suites, cur):
             kinds[k] = kinds.get(k, 0) + 1
     f = {"suite": sid, "name": all_suites[sid]["name"], "isBar": is_bar,
          "ownPlugins": len(own), "ownKinds": kinds,
+         # no bar widgets of its own: it draws its bar's contents itself
+         # (Synoptik), so an empty layout is how it's meant to be
+         "drawsOwn": "bar-widget" not in kinds,
          "declaresRules": isinstance(all_suites[sid]["manifest"].get("shellSwapper"), dict),
          "layoutKnown": default_bar(sid, all_suites) is not None,
          "notifiers": sorted(p for p, i in own.items()
@@ -2070,7 +2073,7 @@ def check_suite(sid, all_suites, cur):
         f["foreignPlugins"] = [entry_id(p) for p in cur.get("plugins") or []
                                if owner(entry_id(p), all_suites) not in (None, sid)
                                and entry_id(p) not in (cur.get("disabledPlugins") or [])]
-        if not f["widgets"]:
+        if not f["widgets"] and not f["drawsOwn"]:
             f["advice"].append("its bar has no widgets: run its installer again, then save it (s)")
     elif not f["layoutKnown"]:
         f["advice"].append("not set up yet: run its own installer (it makes itself your bar), then it's saved for you")
@@ -2105,7 +2108,7 @@ def check_new(auto=True):
             outs = loadouts()
             have = [lid for lid, d in outs.items() if d.get("suite") == sid]
             f["loadout"] = have[0] if have else ""
-            if auto and f["isBar"] and not have and f.get("widgets"):
+            if auto and f["isBar"] and not have and (f.get("widgets") or f["drawsOwn"]):
                 lid = unique_id(f["name"], set(outs))
                 snap = snapshot(cur, f["name"], sid)
                 snap["note"] = "saved when it was first found, exactly as its installer set it up"
@@ -2684,6 +2687,16 @@ def summary_bar(bar):
     return {k: [entry_id(e) for e in (lay.get(k) or [])] for k in ("left", "center", "right")}
 
 
+def bar_position(d):
+    """Where a loadout's bar sits: as its picture found it (a shell that keeps
+    its own position setting, like Synoptik, doesn't use shell.json's), else
+    shell.json's bar.position."""
+    p = d.get("preview")
+    if isinstance(p, dict) and p.get("position") in ("top", "bottom", "left", "right"):
+        return p["position"]
+    return (d.get("bar") or {}).get("position", "top")
+
+
 def listing():
     with Lock():
         seed()
@@ -2705,7 +2718,7 @@ def listing():
                       "suiteName": all_suites.get(d.get("suite", ""), {}).get("name", d.get("suite", "")),
                       "installed": d.get("suite", "") in all_suites, "saved": d.get("saved", ""),
                       "note": d.get("note", ""), "preview": d.get("preview", ""),
-                      "position": (d.get("bar") or {}).get("position", "top"),
+                      "position": bar_position(d),
                       "layout": summary_bar(d.get("bar")), "active": lid == st.get("active"),
                       "widgets": widget_report(d, all_suites, inst),
                       "keys": [{"keys": b["keys"], "desc": b.get("desc", ""), "clashLine": mine.get(b["keys"], 0)}

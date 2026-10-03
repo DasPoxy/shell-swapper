@@ -38,6 +38,8 @@ plugin("acme.lock", ["service"], omarchy={"clonedFrom": "omarchy.lock"})
 plugin("acme.osd", ["panel"], omarchy={"clonedFrom": "omarchy.osd"})
 plugin("acme.audio", ["bar-widget"], omarchy={"clonedFrom": "omarchy.audio"})
 plugin("other.bar", ["bar"])
+plugin("solo.bar", ["bar"])          # draws its own bar: no widget plugins
+plugin("solo.lock", ["service"])
 plugin("taskchy", ["overlay"])
 
 
@@ -104,6 +106,20 @@ class Ownership(unittest.TestCase):
         self.assertEqual(owns("io.github.someone.bar"), [], "not every plugin that author made")
         self.assertEqual(owns("com.example.bar"), [])
         self.assertEqual(owns("io.github.someone.cool-shell.bar"), ["io.github.someone.cool-shell."])
+
+
+class Listing(unittest.TestCase):
+    def test_position_from_the_picture(self):
+        self.assertEqual(ss.bar_position({"bar": {"position": "top"}, "preview": {"position": "left"}}), "left")
+        self.assertEqual(ss.bar_position({"bar": {"position": "bottom"}}), "bottom")
+
+    def test_empty_layout_advice(self):
+        ss._MANIFESTS = None
+        for sid, draws_own in (("solo.bar", True), ("acme.bar", False)):
+            cur = {"bar": {"id": sid, "layout": {}}, "plugins": [], "disabledPlugins": []}
+            f = ss.check_suite(sid, ss.suites(), cur)
+            self.assertEqual(f["drawsOwn"], draws_own, sid)
+            self.assertEqual(any("no widgets" in a for a in f["advice"]), not draws_own, sid)
 
 
 class Imports(unittest.TestCase):
