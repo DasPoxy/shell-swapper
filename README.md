@@ -5,6 +5,14 @@ Slime Shell, Ruixen, or any other plugin suite that replaces the bar. Each
 keeps its own layout and widget settings, every swap is backed up, and a swap
 reverts itself unless you keep it.
 
+> **Beta.** Shell-Swapper backs up everything it changes and reverts a swap
+> you don't keep, but so far it has only been used on its author's machine, and it
+> depends on details of Omarchy that can change. Run `shell-swapper doctor`
+> first; if something goes wrong, the rescue key (Super+Ctrl+Alt+Backspace)
+> puts back the last shell you kept. Please
+> [report what happens](../../issues/new?template=bug.md) - including "it
+> worked" on setups unlike the author's. See the [changelog](CHANGELOG.md).
+
 ## What it does
 
 - **Finds your bar suites.** Any installed plugin that can be the bar

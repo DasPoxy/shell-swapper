@@ -27,5 +27,12 @@ The first tagged release, for testing beyond its author's machine.
   uninstalling a shell (archived, restorable; its installer's records too).
 - **Install / uninstall**: `install.sh`, `install.sh --uninstall` (keeps
   the keys of the shell you're in), and installing again puts keys back.
+- **Safety for new setups**: `shell-swapper doctor` checks what it needs from
+  Omarchy; swaps are refused when something is missing and an untested
+  Omarchy version is flagged in the picker. Uninstalling a shell keeps
+  plugins credited to another author unless asked (`--all`), and needs `u`
+  to confirm.
+- **Tests and CI**: the swap lifecycle (apply, keep, revert, the watchdog,
+  rescue), keys, uninstall/restore; run on every push.
 - **Audit fixes (2026-10-09)**: Lua quoting that could break the Hyprland
   config, symlinked config files, a shell's installer refusing to reinstall.
