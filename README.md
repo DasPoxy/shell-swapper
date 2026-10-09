@@ -107,6 +107,12 @@ backups (`~/.local/state/shell-swapper`) are kept, so installing again picks
 up where you left off; add `--purge` to delete them too (that includes the
 backups of your setup from before Shell-Swapper).
 
+Installing again afterwards (`omarchy plugin add`, then `install.sh`) notices
+what the uninstall left in `bindings.lua` and offers to put it back: the
+loadout keys move back into the loadout, Shell-Swapper's keys are
+un-commented and the keys hook returns - as before the uninstall (`--yes`
+does it without asking; or later, `shell-swapper keys reinstate --yes`).
+
 ## The picker
 
 | key | does |
