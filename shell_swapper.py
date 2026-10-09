@@ -3141,8 +3141,12 @@ def installer_records(sid):
         if len(word) < 4 or word in GENERIC_WORDS or word == "shell-swapper":
             continue
         d = os.path.join(STATE_HOME, word)
+        # only a real install record (install.json, installed.json,
+        # install-state...): a shell's own state there (settings, reminders)
+        # is yours, not its installer's, and stays
         if os.path.isdir(d) and not os.path.islink(d) and any(
-                re.search(r"install|manifest|state|lock", f, re.I) for f in os.listdir(d)):
+                re.fullmatch(r"(install(ed)?([-_. ]?(state|record|manifest|info))?|\.?install[-_]?lock)(\.json|\.toml|\.txt)?",
+                             f, re.I) for f in os.listdir(d)):
             out.append(d)
     return out
 

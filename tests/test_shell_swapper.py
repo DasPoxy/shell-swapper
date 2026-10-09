@@ -476,3 +476,14 @@ class SwapLifecycle(unittest.TestCase):
         finally:
             os.environ["SHELL_SWAPPER_LOCKED"] = "false"
         self.assertEqual(self.bar(), "acme.bar")
+
+    def test_a_shells_own_state_is_not_installer_records(self):
+        d = os.path.join(ss.STATE_HOME, "qqshell")
+        os.makedirs(d, exist_ok=True)
+        for f in ("lock-style.json", "reminders.json", "state.json"):
+            with open(os.path.join(d, f), "w") as h:
+                h.write("{}")
+        self.assertEqual(ss.installer_records("qqshell.bar"), [])
+        with open(os.path.join(d, "install.json"), "w") as h:
+            h.write("{}")
+        self.assertEqual(ss.installer_records("qqshell.bar"), [d])
