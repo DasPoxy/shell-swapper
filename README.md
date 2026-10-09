@@ -81,6 +81,32 @@ o.bind("SUPER + CTRL + ALT + S", "Shell-Swapper", "omarchy-shell shell toggle sh
 o.bind("SUPER + CTRL + ALT + BACKSPACE", "Shell-Swapper rescue", "shell-swapper rescue")
 ```
 
+## Uninstall
+
+From the plugin's folder (or the checkout you installed from):
+
+```sh
+~/.config/omarchy/plugins/shell-swapper/install.sh --uninstall
+```
+
+It says what it's going to do and asks first (`--yes` skips the question),
+and won't run while a swap is waiting to be kept or reverted. It:
+
+- keeps the keys of the shell you're in: the loadout keys live in
+  `~/.config/hypr/shell_swapper.lua` are moved into `bindings.lua`, under a
+  heading saying where they came from;
+- takes out the block that loads loadout keys from `hyprland.lua`, and
+  comments out (doesn't delete) the Shell-Swapper keys in `bindings.lua`;
+  all three files are backed up first, next to themselves, as
+  `*.before-shell-swapper-uninstall-<time>`;
+- disables and removes the plugin, the `shell-swapper` CLI link and, in a
+  checkout, its `--dev-hooks` git hooks.
+
+Your shell stays as it is. Your loadouts (`~/.config/shell-swapper`) and
+backups (`~/.local/state/shell-swapper`) are kept, so installing again picks
+up where you left off; add `--purge` to delete them too (that includes the
+backups of your setup from before Shell-Swapper).
+
 ## The picker
 
 | key | does |
