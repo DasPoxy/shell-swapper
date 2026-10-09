@@ -67,6 +67,9 @@ is only touched when you move keys in or out, and always backed up first):
   keys remove ID N              take key N out (back to bindings.lua if it came from there)
   keys add ID 'o.bind(...)'     give a loadout a key
   keys backups | keys restore BACKUP
+  keys reinstate                after uninstalling and installing again: put the
+                                keys the uninstall kept in bindings.lua back in
+                                the loadout, as they were
 Anything that would change the keys you have now prints its plan and exits
 with status 2 instead; run it again with --yes to do it.
 
@@ -2999,6 +3002,52 @@ def keys_flag(rest):
     return "swap" if "--keys" in rest else "keep" if "--keep-keys" in rest else None
 
 
+# What `install.sh --uninstall` leaves in bindings.lua, so a later install can
+# put the keys back the way they were
+KEPT_HEADING = "-- Keys from your Shell-Swapper loadout"
+UNINSTALLED_TAG = "-- (Shell-Swapper uninstalled) "
+
+
+def reinstate_keys(yes):
+    """After an uninstall and a fresh install: take the loadout keys the
+    uninstall kept in bindings.lua back out of it, un-comment Shell-Swapper's
+    own keys, put the hook back and write the active loadout's keys file -
+    as it was before the uninstall."""
+    text = read_text(BINDINGS) or ""
+    lines = text.split("\n")
+    out, kept, i = [], 0, 0
+    while i < len(lines):
+        l = lines[i]
+        if l.startswith(KEPT_HEADING):
+            # the heading and the binds under it, to the next blank line
+            i += 1
+            while i < len(lines) and lines[i].strip():
+                kept += 1
+                i += 1
+            while out and not out[-1].strip():
+                out.pop()
+            continue
+        out.append(l[len(UNINSTALLED_TAG):] if l.startswith(UNINSTALLED_TAG) else l)
+        i += 1
+    restored = sum(1 for l in lines if l.startswith(UNINSTALLED_TAG))
+    new_text = "\n".join(out).rstrip("\n") + "\n"
+    active = status().get("active", "")
+    plan = {"action": "put Shell-Swapper's keys back as before the uninstall",
+            "keptLinesRemoved": kept, "shellSwapperKeysRestored": restored,
+            "hook": not hook_file(), "loadout": active}
+    if not kept and not restored:
+        return {"nothing": "no uninstall leftovers in bindings.lua"}
+    if not yes:
+        raise NeedsYes(plan)
+    key_backup(BINDINGS)
+    write_text(BINDINGS, new_text)
+    hook = install_hook(True)
+    d = loadouts().get(active) if active else None
+    written = write_keys(keys_plan(d)["text"]) if d else None
+    plan.update(done=True, hookResult=hook, keysWritten=bool(written))
+    return plan
+
+
 def keys_cmd(rest):
     yes = "--yes" in rest
     args = [a for a in rest if a != "--yes"]
@@ -3009,6 +3058,8 @@ def keys_cmd(rest):
         return keys_status()
     if sub == "hook":
         return install_hook(yes)
+    if sub == "reinstate":
+        return reinstate_keys(yes)
     if sub == "scan":
         outs = loadouts()
         owners = {}

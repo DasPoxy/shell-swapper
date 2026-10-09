@@ -13,6 +13,8 @@
 #
 # To take it out again:
 #   install.sh --uninstall [--yes] [--purge]
+# (installing again afterwards offers to put your keys back as they were;
+# --yes does it without asking)
 # keeps the keys of the shell you're in (moved into bindings.lua), takes out
 # what Shell-Swapper added to your Hyprland config (backed up first), and
 # removes the plugin and the CLI; your shell stays as it is. Your loadouts
@@ -215,6 +217,22 @@ if [[ -f $plugin_dir/manifest.json ]] \
 fi
 
 link "$here/bin/shell-swapper" "$HOME/.local/bin/shell-swapper"
+
+# installing again after an uninstall: offer to put the keys back as they were
+if grep -qE '^-- Keys from your Shell-Swapper loadout|^-- \(Shell-Swapper uninstalled\) ' "$HOME/.config/hypr/bindings.lua" 2>/dev/null; then
+  echo ""
+  echo "An earlier uninstall left your loadout keys in bindings.lua (and commented out Shell-Swapper's)."
+  echo "Putting them back moves them into the loadout again, un-comments Shell-Swapper's keys and"
+  echo "restores the keys hook - bindings.lua is backed up first."
+  ok=n
+  if (( yes )); then ok=y
+  elif [[ -t 0 ]]; then read -r -p "Put them back? [Y/n] " ok; [[ -z $ok ]] && ok=y
+  else echo "(run install.sh --yes, or: shell-swapper keys reinstate --yes)"
+  fi
+  if [[ $ok == [yY]* ]]; then
+    "$here/bin/shell-swapper" keys reinstate --yes >/dev/null && echo "keys put back" && { hyprctl reload >/dev/null 2>&1 || true; }
+  fi
+fi
 
 cat <<'MSG'
 
