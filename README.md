@@ -125,7 +125,7 @@ does it without asking; or later, `shell-swapper keys reinstate --yes`).
 | s | save the current shell as a new loadout (or update one by its name) |
 | r | rename the loadout |
 | d, d | delete it (to `~/.local/state/shell-swapper/trash/`); keys you moved into it go back into `bindings.lua` |
-| , (or the ⚙ settings button, top right) | settings: the lock screen for every shell |
+| , (or the ⚙ settings button, top right) | settings: the lock screen for every shell, the backups folder, uninstalling a shell |
 | Esc | close |
 
 The right side shows the loadout's bar: a **picture** of it (in three
@@ -149,6 +149,22 @@ instead, such as [Lock Screen Explorer](https://github.com/SirJul1337/omarchy-lo
 and stays on whichever shell you swap to, with its own settings, over a
 shell's own lock screen; picking Omarchy's goes back. Without a pick, a
 shell that brings its own lock screen uses it while it's on screen.
+
+### Backups and uninstalling a shell (settings)
+
+**b** opens the backups folder (`~/.local/state/shell-swapper/backups`):
+every swap's `shell.json` and keybind files, your setup from before
+Shell-Swapper (`original/`) and shells you've uninstalled.
+
+**u** uninstalls a shell: pick one and it shows exactly what goes first - its
+bar and the plugins that come with it (the ones sharing its id's prefix:
+`synoptik.bar`, `synoptik.notifications`...). Omarchy's own and the shell
+you're in aren't offered, and anything the shell you're in or another
+shell's loadout still uses is kept (say, a Slime widget on another shell's
+bar). The removed plugins are archived first, in `backups/uninstalled/`
+(unpack one back into `~/.config/omarchy/plugins` to restore it); your
+loadouts for that shell are kept until you delete them. From the command
+line: `shell-swapper uninstall-shell SUITE [--yes]`.
 
 ## Widgets stay on their own shell's bar
 
@@ -320,7 +336,7 @@ starting fresh. Slime Shell, Ruixen and Omarchy's bar have these built in.
 |---|---|
 | `~/.config/shell-swapper/loadouts/*.json` | your loadouts |
 | `~/.config/shell-swapper/config.json` | apply mode, keep-it timer |
-| `~/.local/state/shell-swapper/` | backups (shell.json and keybind files), the last kept config, a waiting swap |
+| `~/.local/state/shell-swapper/` | backups (shell.json and keybind files, `uninstalled/` shells), the last kept config, a waiting swap |
 | `~/.config/hypr/shell_swapper.lua` | the keys of the loadout in use (written on a swap) |
 
 MIT licensed.

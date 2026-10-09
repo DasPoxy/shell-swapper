@@ -33,6 +33,10 @@ Commands (all print JSON; errors go to stderr with exit status 1):
                                 the shell (bind it to a key: it works even when
                                 the bar doesn't come up)
   rename ID NAME
+  uninstall-shell SUITE         remove an installed shell: its bar and companion
+                                plugins (archived first to backups/uninstalled;
+                                not the one you're in; anything still used
+                                elsewhere stays). Plan first, --yes to do it
   delete ID                     (not the active one; keys moved into it go back
                                 into bindings.lua: plan first, --yes to do it)
   config [KEY VALUE]            settings: apply = restart | reload, confirmSeconds
@@ -2982,6 +2986,12 @@ def run(argv):
         if not rest:
             raise Fail("delete ID")
         return delete_loadout(rest[0], "--yes" in rest)
+    if cmd == "uninstall-shell":
+        args = [a for a in rest if a != "--yes"]
+        if not args:
+            raise Fail("uninstall-shell SUITE (a bar id, see suites)")
+        with Lock():
+            return uninstall_shell(args[0], "--yes" in rest)
     if cmd == "config":
         c = config()
         if len(rest) >= 2:
@@ -3000,6 +3010,101 @@ def run(argv):
 
 def keys_flag(rest):
     return "swap" if "--keys" in rest else "keep" if "--keep-keys" in rest else None
+
+
+# ---- uninstalling a shell -------------------------------------------------------
+#
+# Settings > Uninstall a shell: a bar suite's plugins out of
+# ~/.config/omarchy/plugins - the bar and its companions (the plugins sharing
+# its id's prefix: synoptik.bar, synoptik.notifications...). Never Omarchy's
+# own, never the shell you're in, never mid-swap; anything the shell you're in
+# or another shell's loadout still uses stays. Each plugin removed is archived
+# first (backups/uninstalled/), and your loadouts for it are kept.
+
+USER_PLUGINS = os.path.join(HOME, ".config/omarchy/plugins")
+UNINSTALLED = os.path.join(BACKUPS, "uninstalled")
+
+
+def _used_ids(cfg):
+    """the plugin ids a shell config (shell.json or a loadout) has on: its
+    plugins and everything placed on its bar, less the ones it disables"""
+    ids = set()
+    for p in cfg.get("plugins") or []:
+        if isinstance(p, dict) and p.get("id"):
+            ids.add(p["id"])
+        elif isinstance(p, str):
+            ids.add(p)
+    bar = cfg.get("bar") or {}
+    if isinstance(bar, dict):
+        if bar.get("id"):
+            ids.add(bar["id"])
+        for v in bar.values():
+            if isinstance(v, str) and "." in v:
+                ids.add(v)                     # e.g. centerAnchor
+        for section in (bar.get("layout") or {}).values():
+            for w in section or []:
+                if isinstance(w, dict) and w.get("id"):
+                    ids.add(w["id"])
+    return ids - set(cfg.get("disabledPlugins") or [])
+
+
+def uninstall_shell(sid, yes):
+    if pending():
+        raise Fail("a swap is waiting to be kept or reverted: do that first")
+    try:
+        current = bar_id(json.load(open(SHELL_JSON)))
+    except (OSError, ValueError):
+        current = ""
+    found = suites()
+    s = found.get(sid)
+    if not s:
+        raise Fail(f"'{sid}' isn't an installed shell (see shell-swapper suites)")
+    if not os.path.realpath(s.get("dir", "")).startswith(os.path.realpath(USER_PLUGINS) + os.sep):
+        raise Fail(f"{s.get('name', sid)} is built into Omarchy: it can't be uninstalled")
+    if sid == current:
+        raise Fail(f"{s.get('name', sid)} is the shell you're in: swap to another one first")
+    prefix = sid.rsplit(".", 1)[0] + "." if "." in sid else sid + "."
+    group = sorted(d for d in os.listdir(USER_PLUGINS)
+                   if not d.startswith(".") and (d == sid or d.startswith(prefix))
+                   and os.path.exists(os.path.join(USER_PLUGINS, d, "manifest.json")))
+    # what's still wanted elsewhere: the shell you're in, and other shells' loadouts
+    try:
+        now = _used_ids(json.load(open(SHELL_JSON)))
+    except (OSError, ValueError):
+        now = set()
+    outs = loadouts()
+    elsewhere = {}
+    for lid, d in outs.items():
+        if d.get("suite") == sid:
+            continue
+        for pid in _used_ids(d):
+            elsewhere.setdefault(pid, []).append(d.get("name", lid))
+    remove, keep = [], []
+    for pid in group:
+        why = "in use in the shell you're in" if pid in now else \
+              ("used by " + ", ".join(sorted(set(elsewhere[pid])))) if pid in elsewhere else ""
+        (keep if why and pid != sid else remove).append({"id": pid, "why": why} if why else {"id": pid})
+    own = sorted(d.get("name", lid) for lid, d in outs.items() if d.get("suite") == sid)
+    plan = {"action": f"uninstall {s.get('name', sid)}", "shell": sid, "name": s.get("name", sid),
+            "remove": remove, "keep": keep, "loadoutsKept": own,
+            "archive": os.path.join(UNINSTALLED, f"{sid}-<time>.tar.gz")}
+    if not yes:
+        raise NeedsYes(plan)
+    os.makedirs(UNINSTALLED, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive = os.path.join(UNINSTALLED, f"{sid}-{stamp}.tar.gz")
+    subprocess.run(["tar", "czf", archive, "-C", USER_PLUGINS] + [r["id"] for r in remove], check=True)
+    for r in remove:
+        subprocess.run(["omarchy-shell", "shell", "setPluginEnabled", r["id"], "false"],
+                       capture_output=True, timeout=5)
+        path = os.path.join(USER_PLUGINS, r["id"])
+        if os.path.islink(path):
+            os.unlink(path)
+        else:
+            shutil.rmtree(path)
+    subprocess.run(["omarchy-shell", "shell", "rescanPlugins"], capture_output=True, timeout=5)
+    plan.update(done=True, archive=archive)
+    return plan
 
 
 # What `install.sh --uninstall` leaves in bindings.lua, so a later install can

@@ -72,6 +72,15 @@ FocusScope {
     var out = [], home = Quickshell.env("HOME") || ""
     function short(f) { return home && String(f).indexOf(home) === 0 ? "~" + String(f).slice(home.length) : String(f) }
     function base(f) { return String(f).split("/").pop() }
+    // uninstalling a shell (settings)
+    if (p.shell && p.remove) {
+      out.push({ text: "Removes " + p.remove.length + " plugin" + (p.remove.length === 1 ? "" : "s") + " from ~/.config/omarchy/plugins:" })
+      p.remove.forEach(function(r) { out.push({ text: "−  " + r.id, tone: "remove" }) })
+      ;(p.keep || []).forEach(function(k) { out.push({ text: "kept: " + k.id + "  (" + k.why + ")", tone: "dim" }) })
+      out.push({ text: "They're archived first: " + short(String(p.archive).replace("<time>", "…")) + " - unpack it back into the plugins folder to restore them.", tone: "dim" })
+      if ((p.loadoutsKept || []).length)
+        out.push({ text: "Your loadout" + (p.loadoutsKept.length === 1 ? "" : "s") + " for it (" + p.loadoutsKept.join(", ") + ") stay" + (p.loadoutsKept.length === 1 ? "s" : "") + ": delete " + (p.loadoutsKept.length === 1 ? "it" : "them") + " with d if you don't want " + (p.loadoutsKept.length === 1 ? "it" : "them") + ".", tone: "dim" })
+    }
     // installing a plugin (a lock screen picked in the settings)
     if (p.url) {
       out.push({ text: "Installs it from " + p.url + ", the way Omarchy adds any plugin:" })
@@ -209,8 +218,29 @@ FocusScope {
                  planRun(["lock", o.id], function(ok) { if (ok) say("Lock screen: " + o.name + ", in every shell.") })
                } }
     })
+    lines.push({ text: "Backups: every swap's shell.json and keybind files, your setup from before Shell-Swapper, and shells you've uninstalled.", tone: "dim" })
+    buttons.push({ label: "Open backups folder", hint: "b", key: Qt.Key_B, act: function() {
+      closeAsk()
+      Quickshell.execDetached(["xdg-open", (Quickshell.env("HOME") || "") + "/.local/state/shell-swapper/backups"])
+    } })
+    buttons.push({ label: "Uninstall a shell…", hint: "u", key: Qt.Key_U, act: function() { closeAsk(); askUninstall() } })
     buttons.push({ label: "Close", hint: "Esc", act: function() { closeAsk() } })
     ask = { title: "Settings", lines: lines, buttons: buttons }
+  }
+  // settings > uninstall a shell: which one (not Omarchy's own, not the one you're in)
+  function askUninstall() {
+    var shells = (info.suites || []).filter(function(s) { return s.id !== "omarchy.bar" && s.id !== info.current })
+    var lines = [{ text: "Uninstall a shell: its bar and the plugins that come with it, archived first so you can restore them. You'll see exactly what goes before anything happens." },
+                 { text: "Not listed: Omarchy's own (built in) and " + suiteName(info.current || "") + " (the shell you're in: swap away first).", tone: "dim" }]
+    var buttons = shells.slice(0, 9).map(function(s, i) {
+      return { label: s.name, hint: String(i + 1), key: Qt.Key_1 + i, act: function() {
+        closeAsk()
+        planRun(["uninstall-shell", s.id], function(ok) { if (ok) say(s.name + " uninstalled; it's archived in your backups (uninstalled/).") })
+      } }
+    })
+    if (!shells.length) lines.push({ text: "No other shells installed.", tone: "dim" })
+    buttons.push({ label: "Back", hint: "Esc", act: function() { closeAsk(); openSettings() } })
+    ask = { title: "Uninstall a shell", lines: lines, buttons: buttons }
   }
   function doSwap(id, name, flag) {
     var args = ["apply", id]
