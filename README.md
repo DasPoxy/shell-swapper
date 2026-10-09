@@ -81,6 +81,19 @@ o.bind("SUPER + CTRL + ALT + S", "Shell-Swapper", "omarchy-shell shell toggle sh
 o.bind("SUPER + CTRL + ALT + BACKSPACE", "Shell-Swapper rescue", "shell-swapper rescue")
 ```
 
+## Will it work here?
+
+```sh
+shell-swapper doctor
+```
+
+checks what Shell-Swapper needs from Omarchy: `shell.json` in the shape it
+knows, the shell's plugin folders, `omarchy-shell`, and Hyprland's Lua config
+(for keys per loadout). If something it needs is missing, swaps are refused
+and the picker says why; on an Omarchy version this release wasn't tested on
+(see `TESTED_OMARCHY`, and the [changelog](CHANGELOG.md)) it only warns -
+swaps are still backed up and still revert unless kept.
+
 ## Uninstall
 
 From the plugin's folder (or the checkout you installed from):
@@ -161,7 +174,10 @@ bar and the plugins that come with it (the ones sharing its id's prefix:
 `synoptik.bar`, `synoptik.notifications`...). Omarchy's own and the shell
 you're in aren't offered, and anything the shell you're in or another
 shell's loadout still uses is kept (say, a Slime widget on another shell's
-bar). The removed plugins are archived first, in `backups/uninstalled/`
+bar). A plugin that shares the prefix but is credited to another author
+isn't assumed to be part of it: it's kept and marked *unsure* (include those
+with the dialog's **a**, or `--all`). Confirming takes **u** - Enter cancels.
+The removed plugins are archived first, in `backups/uninstalled/`
 (**r** in the settings restores one); your loadouts for that shell are kept
 until you delete them. A shell whose own installer keeps records of what it
 installed (Shibumi's `~/.local/state/shibumi`) has those archived and cleared

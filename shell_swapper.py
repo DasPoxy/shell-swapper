@@ -16,6 +16,8 @@ shell shows "Keep this shell?"; if nobody answers (or the new shell never
 comes up to ask), a watchdog puts the old config back.
 
 Commands (all print JSON; errors go to stderr with exit status 1):
+  doctor                        will it work here? the Omarchy version, and
+                                what Shell-Swapper needs from it
 
   list                          suites, loadouts, the active one, a pending swap
   suites                        the bar suites installed
@@ -33,7 +35,7 @@ Commands (all print JSON; errors go to stderr with exit status 1):
                                 the shell (bind it to a key: it works even when
                                 the bar doesn't come up)
   rename ID NAME
-  uninstall-shell SUITE         remove an installed shell: its bar and companion
+  uninstall-shell SUITE [--all] remove an installed shell: its bar and companion
                                 plugins (archived first to backups/uninstalled;
                                 not the one you're in; anything still used
                                 elsewhere stays; its installer's own records
@@ -2670,6 +2672,9 @@ def apply(arg, confirm=True, keys=None):
     are) or None (ask: NeedsYes with what would change)."""
     if locked():
         raise Fail("the screen is locked; swap after unlocking")
+    doc = doctor()
+    if not doc["ok"]:
+        raise Fail("not swapping: " + "; ".join(doc["problems"]) + " (see shell-swapper doctor)")
     with Lock():
         seed()
         if pending():
@@ -2892,6 +2897,49 @@ def listing():
 
 # ---- the command line ------------------------------------------------------------
 
+# ---- will it work here? --------------------------------------------------------
+#
+# Shell-Swapper leans on details of Omarchy (shell.json's shape, the plugin
+# folders, omarchy-shell, the Lua Hyprland config). `doctor` checks them; the
+# picker shows what it finds, and a swap is refused when something it needs
+# is missing (a version it wasn't tested on only warns).
+
+TESTED_OMARCHY = "4.0"        # the Omarchy series this release was tested on
+
+
+def omarchy_version():
+    try:
+        r = subprocess.run(["pacman", "-Q", "omarchy"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.split():
+            return r.stdout.split()[-1].split("-")[0]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return (read_text(os.path.join(OMARCHY, "version")) or "").strip()
+
+
+def doctor():
+    ver = omarchy_version()
+    problems, warnings = [], []
+    if not ver:
+        warnings.append("can't tell which Omarchy version this is")
+    elif not (ver == TESTED_OMARCHY or ver.startswith(TESTED_OMARCHY + ".")):
+        warnings.append(f"Omarchy {ver}: this Shell-Swapper was tested on Omarchy {TESTED_OMARCHY}.x - "
+                        "swaps still back up and revert, but check for an update")
+    cfg = read_json(SHELL_JSON, None)
+    if not isinstance(cfg, dict):
+        problems.append(f"{SHELL_JSON} is missing or isn't JSON")
+    elif not isinstance(cfg.get("bar"), dict):
+        problems.append("shell.json has no bar section in the shape Shell-Swapper knows")
+    if not shutil.which("omarchy-shell"):
+        problems.append("omarchy-shell isn't on PATH (the Quickshell-based Omarchy shell)")
+    if not os.path.isdir(os.path.join(OMARCHY, "shell/plugins")):
+        problems.append(f"no Omarchy shell plugins at {os.path.join(OMARCHY, 'shell/plugins')}")
+    if not os.path.exists(HYPRLAND):
+        warnings.append(f"no {HYPRLAND}: keys per loadout need Hyprland's Lua config; swapping shells still works")
+    return {"omarchy": ver, "tested": TESTED_OMARCHY, "ok": not problems,
+            "problems": problems, "warnings": warnings}
+
+
 def run(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__.strip())
@@ -2906,9 +2954,11 @@ def run(argv):
         if len(rest) < 2:
             raise Fail("loadout-restore ID BACKUP (see backups)")
         return restore_loadout(rest[0], rest[1], "--yes" in rest)
+    if cmd == "doctor":
+        return doctor()
     if cmd == "list":
         check_new()   # a bar installed since: checked (and saved) before anything else
-        return listing()
+        return dict(listing(), doctor=doctor())
     if cmd == "check-new":
         return check_new()
     if cmd == "preview":
@@ -3039,11 +3089,11 @@ def run(argv):
         with Lock():
             return restore_shell(args[0], "--yes" in rest)
     if cmd == "uninstall-shell":
-        args = [a for a in rest if a != "--yes"]
+        args = [a for a in rest if a not in ("--yes", "--all")]
         if not args:
             raise Fail("uninstall-shell SUITE (a bar id, see suites)")
         with Lock():
-            return uninstall_shell(args[0], "--yes" in rest)
+            return uninstall_shell(args[0], "--yes" in rest, "--all" in rest)
     if cmd == "config":
         c = config()
         if len(rest) >= 2:
@@ -3119,7 +3169,7 @@ def _used_ids(cfg):
     return ids - set(cfg.get("disabledPlugins") or [])
 
 
-def uninstall_shell(sid, yes):
+def uninstall_shell(sid, yes, everything=False):
     if pending():
         raise Fail("a swap is waiting to be kept or reverted: do that first")
     try:
@@ -3151,14 +3201,21 @@ def uninstall_shell(sid, yes):
         for pid in _used_ids(d):
             elsewhere.setdefault(pid, []).append(d.get("name", lid))
     remove, keep = [], []
+    # sharing the bar's prefix isn't proof it belongs to the shell: another
+    # author's plugin could use it too. Those are kept unless asked (--all)
+    author = (read_json(os.path.join(USER_PLUGINS, sid, "manifest.json"), {}) or {}).get("author", "")
     for pid in group:
         why = "in use in the shell you're in" if pid in now else \
               ("used by " + ", ".join(sorted(set(elsewhere[pid])))) if pid in elsewhere else ""
+        theirs = (read_json(os.path.join(USER_PLUGINS, pid, "manifest.json"), {}) or {}).get("author", "")
+        if not why and not everything and pid != sid and author and theirs and theirs != author:
+            why = f"unsure: by {theirs}, not {author} (include it with --all)"
         (keep if why and pid != sid else remove).append({"id": pid, "why": why} if why else {"id": pid})
     own = sorted(d.get("name", lid) for lid, d in outs.items() if d.get("suite") == sid)
     records = installer_records(sid)
     plan = {"action": f"uninstall {s.get('name', sid)}", "shell": sid, "name": s.get("name", sid),
             "remove": remove, "keep": keep, "loadoutsKept": own, "records": records,
+            "unsure": [k["id"] for k in keep if k["why"].startswith("unsure")],
             "archive": os.path.join(UNINSTALLED, f"{sid}-<time>.tar.gz")}
     if not yes:
         raise NeedsYes(plan)
@@ -3188,6 +3245,8 @@ def uninstall_shell(sid, yes):
         subprocess.run(["omarchy-shell", "shell", "rescanPlugins"], capture_output=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         pass
+    global _MANIFESTS
+    _MANIFESTS = None                      # the plugins changed under this run
     plan.update(done=True, archive=archive)
     return plan
 
@@ -3237,6 +3296,8 @@ def restore_shell(name, yes):
         subprocess.run(["omarchy-shell", "shell", "rescanPlugins"], capture_output=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         pass
+    global _MANIFESTS
+    _MANIFESTS = None
     return dict(plan, done=True)
 
 

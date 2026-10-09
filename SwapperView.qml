@@ -185,6 +185,18 @@ FocusScope {
   }
   function askPlan(args, plan, done) {
     var t = String(plan.action || "Change your keys")
+    // uninstalling a shell removes plugins: Enter alone won't do it
+    if (args[0] === "uninstall-shell") {
+      var n = (plan.remove || []).length, unsure = plan.unsure || []
+      var bs = [{ label: "Uninstall " + n + " plugin" + (n === 1 ? "" : "s"), hint: "u", key: Qt.Key_U,
+                  act: function() { closeAsk(); run(args.concat(["--yes"]), done) } }]
+      if (unsure.length && args.indexOf("--all") < 0)
+        bs.push({ label: "Include the " + unsure.length + " unsure one" + (unsure.length === 1 ? "" : "s"), hint: "a", key: Qt.Key_A,
+                  act: function() { closeAsk(); planRun(args.concat(["--all"]), done) } })
+      bs.push({ label: "Cancel", hint: "Esc", primary: true, act: function() { closeAsk() } })
+      ask = { title: t.charAt(0).toUpperCase() + t.slice(1) + "?", lines: lineList(plan), buttons: bs }
+      return
+    }
     ask = {
       title: t.charAt(0).toUpperCase() + t.slice(1) + "?",
       lines: lineList(plan),
@@ -987,6 +999,26 @@ FocusScope {
         text: "using " + sw.suiteName(sw.info.current || "")
         textFormat: Text.PlainText
         color: sw.faint; font.family: sw.font; font.pixelSize: sw.px(11)
+      }
+    }
+    // doctor: something Shell-Swapper needs from Omarchy is missing (swaps are
+    // refused) or not what it was tested on (a warning)
+    Rectangle {
+      readonly property var d: sw.info.doctor || null
+      readonly property var msgs: d ? (d.problems || []).concat(d.warnings || []) : []
+      visible: msgs.length > 0 && sw.mode === "list"
+      width: parent.width
+      height: visible ? docText.implicitHeight + 16 : 0
+      radius: sw.rad
+      color: sw.tint(sw.urgent, 0.10)
+      border.color: sw.urgent
+      Text {
+        id: docText
+        x: 10; y: 8; width: parent.width - 20
+        wrapMode: Text.Wrap
+        textFormat: Text.PlainText
+        text: (parent.d && !parent.d.ok ? "Swaps are off until this is sorted: " : "Heads up: ") + parent.msgs.join(" · ")
+        color: sw.urgent; font.family: sw.font; font.pixelSize: sw.px(11)
       }
     }
     // a shell found since last time: what the check found, and what to do

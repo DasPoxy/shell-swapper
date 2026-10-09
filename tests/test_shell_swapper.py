@@ -278,6 +278,9 @@ if __name__ == "__main__":
 class AuditFixes(unittest.TestCase):
     """2026-10-09 audit: Lua quoting, symlinked config files, uninstalling a shell."""
 
+    def setUp(self):
+        ss._MANIFESTS = None                  # tests add plugins between runs
+
     TRICKY = ['plain', 'echo "hi"', "toggle x '{\"a\":1}'", 'echo "x" [y]', 'a]]b', 'line1\nline2',
               'x]]\ny', '\nlead', 'tab\there', 'back\\slash', 'bell\x07', 'é ünï', '']
 
@@ -355,3 +358,30 @@ class AuditFixes(unittest.TestCase):
             ss.restore_shell(archived[0]["archive"], True)
         with self.assertRaises(ss.Fail):               # no escaping the archive folder
             ss.restore_shell("../../etc.tar.gz", True)
+
+    def test_doctor_blocks_swaps_on_a_broken_setup(self):
+        good = {"bar": {"id": "acme.bar"}, "plugins": [], "disabledPlugins": []}
+        with open(ss.SHELL_JSON, "w") as f:
+            f.write("not json")
+        d = ss.doctor()
+        self.assertFalse(d["ok"])
+        self.assertTrue(any("shell.json" in p for p in d["problems"]))
+        with self.assertRaises(ss.Fail):
+            ss.apply("anything")
+        with open(ss.SHELL_JSON, "w") as f:
+            json.dump(good, f)
+
+    def test_prefix_match_by_another_author_is_unsure(self):
+        plugin("yy.bar", ["bar"], author="Alice")
+        plugin("yy.clock", ["bar-widget"], author="Alice")
+        plugin("yy.stranger", ["bar-widget"], author="Bob")
+        with open(ss.SHELL_JSON, "w") as f:
+            json.dump({"bar": {"id": "acme.bar"}, "plugins": [], "disabledPlugins": []}, f)
+        with self.assertRaises(ss.NeedsYes) as c:
+            ss.uninstall_shell("yy.bar", False)
+        p = c.exception.plan
+        self.assertEqual(sorted(r["id"] for r in p["remove"]), ["yy.bar", "yy.clock"])
+        self.assertEqual(p["unsure"], ["yy.stranger"])
+        with self.assertRaises(ss.NeedsYes) as c:
+            ss.uninstall_shell("yy.bar", False, everything=True)
+        self.assertIn("yy.stranger", [r["id"] for r in c.exception.plan["remove"]])
