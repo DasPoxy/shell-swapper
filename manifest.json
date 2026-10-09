@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "shell-swapper",
   "name": "Shell-Swapper",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.1",
   "author": "DasPoxy",
   "license": "MIT",
   "description": "Swap between shell loadouts (Omarchy's bar, Slime Shell, Ruixen...) in a keystroke. Each keeps its own layout; every swap is backed up and reverts itself unless you keep it.",
