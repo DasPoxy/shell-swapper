@@ -1896,7 +1896,9 @@ FocusScope {
           }
         }
         Item { width: 1; height: 4 }
-        Row {
+        // the buttons wrap onto more lines rather than running off the panel
+        Flow {
+          width: askCol.width
           spacing: 8
           Repeater {
             model: sw.ask ? sw.ask.buttons : []
