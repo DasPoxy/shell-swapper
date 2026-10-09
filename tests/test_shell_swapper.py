@@ -14,7 +14,16 @@ os.environ.update({
     "SHELL_SWAPPER_RESTART": "", "SHELL_SWAPPER_RELOAD": "", "SHELL_SWAPPER_CHECK": "",
     "SHELL_SWAPPER_HYPR_RELOAD": "", "SHELL_SWAPPER_LOCKED": "false",
     "SHELL_SWAPPER_PLUGIN_LIST": os.path.join(HOME, "no-plugin-list.json"),
+    "SHELL_SWAPPER_WATCHDOG": "0",
 })
+# stand-ins for Omarchy's commands, so this runs anywhere (CI included)
+_STUBS = os.path.join(HOME, "stubbin")
+os.makedirs(_STUBS, exist_ok=True)
+for _c in ("omarchy-shell", "hyprctl", "notify-send"):
+    with open(os.path.join(_STUBS, _c), "w") as _f:
+        _f.write("#!/bin/sh\nexit 0\n")
+    os.chmod(os.path.join(_STUBS, _c), 0o755)
+os.environ["PATH"] = _STUBS + os.pathsep + os.environ.get("PATH", "")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import shell_swapper as ss  # noqa: E402
 
@@ -308,7 +317,7 @@ class AuditFixes(unittest.TestCase):
         os.symlink(real, link)
         ss.write_text(link, "new\n")
         self.assertTrue(os.path.islink(link))
-        self.assertEqual(open(real).read(), "new\n")
+        self.assertEqual(ss.read_text(real), "new\n")
         self.assertEqual(os.stat(real).st_mode & 0o777, 0o600)
 
     def test_uninstall_shell_guards(self):
@@ -385,3 +394,85 @@ class AuditFixes(unittest.TestCase):
         with self.assertRaises(ss.NeedsYes) as c:
             ss.uninstall_shell("yy.bar", False, everything=True)
         self.assertIn("yy.stranger", [r["id"] for r in c.exception.plan["remove"]])
+
+
+class SwapLifecycle(unittest.TestCase):
+    """Apply, keep, revert, the watchdog, and rescue: the paths that protect a
+    user whose new shell won't come up."""
+    START = {"bar": {"id": "acme.bar"}, "plugins": [], "disabledPlugins": []}
+
+    def setUp(self):
+        ss._MANIFESTS = None
+        for f in (ss.PENDING, ss.LAST_GOOD):
+            if os.path.exists(f):
+                os.remove(f)
+        ss.write_json(ss.SHELL_JSON, self.START)
+        ss.save_loadout("acme", dict(ACME))
+        ss.save_loadout("other", dict(OTHER))
+        ss.set_status(active="acme")
+        ss.write_json(ss.LAST_GOOD, self.START)
+
+    def bar(self):
+        return ss.read_json(ss.SHELL_JSON, {}).get("bar", {}).get("id")
+
+    def test_apply_then_revert_puts_it_back(self):
+        r = ss.apply("other", keys="keep")
+        self.assertTrue(r["pending"])
+        self.assertEqual(self.bar(), "other.bar")
+        self.assertTrue(os.path.isfile(os.path.join(r["backup"])))
+        ss.revert(r["token"])
+        self.assertEqual(self.bar(), "acme.bar")
+        self.assertIsNone(ss.pending())
+        self.assertEqual(ss.status().get("active"), "acme")
+
+    def test_keep_makes_it_the_good_config(self):
+        r = ss.apply("other", keys="keep")
+        self.assertTrue(ss.confirm(r["token"])["confirmed"])
+        self.assertIsNone(ss.pending())
+        self.assertEqual(ss.read_json(ss.LAST_GOOD, {})["bar"]["id"], "other.bar")
+        self.assertEqual(ss.status().get("active"), "other")
+
+    def test_a_second_swap_waits_for_the_first(self):
+        ss.apply("other", keys="keep")
+        with self.assertRaises(ss.Fail):
+            ss.apply("acme", keys="keep")
+
+    def test_watchdog_reverts_at_its_deadline(self):
+        r = ss.apply("other", keys="keep")
+        p = ss.pending()
+        p["deadline"] = 0                      # the time has come
+        ss.write_json(ss.PENDING, p)
+        ss.watchdog(r["token"])
+        self.assertEqual(self.bar(), "acme.bar")
+        self.assertIsNone(ss.pending())
+        self.assertEqual(ss.status().get("lastRevert"), "the new shell never asked")
+
+    def test_watchdog_leaves_a_kept_or_newer_swap_alone(self):
+        r = ss.apply("other", keys="keep")
+        ss.confirm(r["token"])
+        ss.watchdog(r["token"])                # nothing pending: returns at once
+        self.assertEqual(self.bar(), "other.bar")
+
+    def test_seen_gives_the_prompt_its_time(self):
+        r = ss.apply("other", keys="keep")
+        before = ss.pending()["deadline"]
+        d = ss.seen(r["token"])["deadline"]
+        self.assertTrue(ss.pending()["seen"])
+        self.assertNotEqual(d, before)
+
+    def test_rescue_restores_the_last_kept_config(self):
+        with open(ss.SHELL_JSON, "w") as f:
+            f.write("{ broken")
+        r = ss.rescue()
+        self.assertTrue(r["rescued"])
+        self.assertEqual(self.bar(), "acme.bar")
+        self.assertEqual(r["active"], "acme")
+
+    def test_no_swaps_while_locked(self):
+        os.environ["SHELL_SWAPPER_LOCKED"] = "true"
+        try:
+            with self.assertRaises(ss.Fail):
+                ss.apply("other", keys="keep")
+        finally:
+            os.environ["SHELL_SWAPPER_LOCKED"] = "false"
+        self.assertEqual(self.bar(), "acme.bar")

@@ -2732,9 +2732,10 @@ def apply(arg, confirm=True, keys=None):
                                  "backup": bpath, "created": created, "keys": kinfo, "started": time.time(),
                                  "deadline": time.time() + SETTLE_SECONDS, "seen": False,
                                  "confirmSeconds": c["confirmSeconds"], "mode": c["apply"]})
-            subprocess.Popen([sys.executable, os.path.abspath(__file__), "_watchdog", token],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
+            if os.environ.get("SHELL_SWAPPER_WATCHDOG", "1") == "1":   # (tests drive it themselves)
+                subprocess.Popen([sys.executable, os.path.abspath(__file__), "_watchdog", token],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
         else:
             write_json(LAST_GOOD, new)
             keep_good_keys()
@@ -3173,8 +3174,8 @@ def uninstall_shell(sid, yes, everything=False):
     if pending():
         raise Fail("a swap is waiting to be kept or reverted: do that first")
     try:
-        current = bar_id(json.load(open(SHELL_JSON)))
-    except (OSError, ValueError):
+        current = bar_id(read_json(SHELL_JSON, {}) or {})
+    except (AttributeError, TypeError):
         current = ""
     found = suites()
     s = found.get(sid)
@@ -3190,8 +3191,8 @@ def uninstall_shell(sid, yes, everything=False):
                    and os.path.exists(os.path.join(USER_PLUGINS, d, "manifest.json")))
     # what's still wanted elsewhere: the shell you're in, and other shells' loadouts
     try:
-        now = _used_ids(json.load(open(SHELL_JSON)))
-    except (OSError, ValueError):
+        now = _used_ids(read_json(SHELL_JSON, {}) or {})
+    except (AttributeError, TypeError):
         now = set()
     outs = loadouts()
     elsewhere = {}

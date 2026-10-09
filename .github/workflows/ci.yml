@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Tools (Lua checks the keybind files Shell-Swapper writes)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4 shellcheck
+
+      - name: Tests
+        run: python -W error::ResourceWarning -m unittest discover -s tests -v
+
+      - name: Scripts
+        run: |
+          bash -n install.sh bin/shell-swapper
+          shellcheck -S warning install.sh bin/shell-swapper
+
+      - name: Manifest
+        run: python -c "import json; m = json.load(open('manifest.json')); assert m['id'] == 'shell-swapper' and m['version'], m"
