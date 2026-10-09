@@ -13,6 +13,8 @@ reverts itself unless you keep it.
 > [report what happens](../../issues/new?template=bug.md) - including "it
 > worked" on setups unlike the author's. See the [changelog](CHANGELOG.md).
 
+![The picker: your shells, a picture of each one's bar, its keys](screenshots/picker.jpg)
+
 ## What it does
 
 - **Finds your bar suites.** Any installed plugin that can be the bar
@@ -136,6 +138,10 @@ does it without asking; or later, `shell-swapper keys reinstate --yes`).
 
 ## The picker
 
+| | |
+| --- | --- |
+| ![A shell's keybinds: its own actions, a key for each](screenshots/keys.jpg) | ![Settings: the lock screen for every shell, backups, uninstalling and restoring a shell](screenshots/settings.jpg) |
+
 | key | does |
 |---|---|
 | ↑ ↓ | pick a loadout, or a suite to start fresh from |
@@ -172,6 +178,9 @@ shell's own lock screen; picking Omarchy's goes back. Without a pick, a
 shell that brings its own lock screen uses it while it's on screen.
 
 ### Backups and uninstalling a shell (settings)
+
+<img src="screenshots/uninstall.jpg" width="420" align="right" alt="Uninstalling a shell: exactly what goes, archived first">
+
 
 **b** opens the backups folder (`~/.local/state/shell-swapper/backups`):
 every swap's `shell.json` and keybind files, your setup from before
