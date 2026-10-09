@@ -36,7 +36,11 @@ Commands (all print JSON; errors go to stderr with exit status 1):
   uninstall-shell SUITE         remove an installed shell: its bar and companion
                                 plugins (archived first to backups/uninstalled;
                                 not the one you're in; anything still used
-                                elsewhere stays). Plan first, --yes to do it
+                                elsewhere stays; its installer's own records
+                                too, so it can be installed fresh). Plan
+                                first, --yes to do it
+  uninstalled                   the shells uninstalled, with their archives
+  restore-shell ARCHIVE         put an uninstalled shell back (plan, --yes)
   delete ID                     (not the active one; keys moved into it go back
                                 into bindings.lua: plan first, --yes to do it)
   config [KEY VALUE]            settings: apply = restart | reload, confirmSeconds
@@ -3026,6 +3030,14 @@ def run(argv):
         if not rest:
             raise Fail("delete ID")
         return delete_loadout(rest[0], "--yes" in rest)
+    if cmd == "uninstalled":
+        return {"shells": uninstalled_shells()}
+    if cmd == "restore-shell":
+        args = [a for a in rest if a != "--yes"]
+        if not args:
+            raise Fail("restore-shell ARCHIVE (see uninstalled)")
+        with Lock():
+            return restore_shell(args[0], "--yes" in rest)
     if cmd == "uninstall-shell":
         args = [a for a in rest if a != "--yes"]
         if not args:
@@ -3063,6 +3075,25 @@ def keys_flag(rest):
 
 USER_PLUGINS = os.path.join(HOME, ".config/omarchy/plugins")
 UNINSTALLED = os.path.join(BACKUPS, "uninstalled")
+STATE_HOME = os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local/state")
+GENERIC_WORDS = {"bar", "shell", "omarchy", "io", "github", "com", "org", "net", "the", "suite", "plugin", "plugins"}
+
+
+def installer_records(sid):
+    """A shell's own installer may keep records of what it installed (e.g.
+    Shibumi's ~/.local/state/shibumi/install.json). Removing its plugins
+    without them leaves the records saying "installed", and its installer
+    then refuses to install again. The folders in ~/.local/state named for
+    a word of the suite's id that hold such records."""
+    out = []
+    for word in re.split(r"[._-]+", sid.lower()):
+        if len(word) < 4 or word in GENERIC_WORDS or word == "shell-swapper":
+            continue
+        d = os.path.join(STATE_HOME, word)
+        if os.path.isdir(d) and not os.path.islink(d) and any(
+                re.search(r"install|manifest|state|lock", f, re.I) for f in os.listdir(d)):
+            out.append(d)
+    return out
 
 
 def _used_ids(cfg):
@@ -3125,8 +3156,9 @@ def uninstall_shell(sid, yes):
               ("used by " + ", ".join(sorted(set(elsewhere[pid])))) if pid in elsewhere else ""
         (keep if why and pid != sid else remove).append({"id": pid, "why": why} if why else {"id": pid})
     own = sorted(d.get("name", lid) for lid, d in outs.items() if d.get("suite") == sid)
+    records = installer_records(sid)
     plan = {"action": f"uninstall {s.get('name', sid)}", "shell": sid, "name": s.get("name", sid),
-            "remove": remove, "keep": keep, "loadoutsKept": own,
+            "remove": remove, "keep": keep, "loadoutsKept": own, "records": records,
             "archive": os.path.join(UNINSTALLED, f"{sid}-<time>.tar.gz")}
     if not yes:
         raise NeedsYes(plan)
@@ -3134,6 +3166,13 @@ def uninstall_shell(sid, yes):
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     archive = os.path.join(UNINSTALLED, f"{sid}-{stamp}.tar.gz")
     subprocess.run(["tar", "czf", archive, "-C", USER_PLUGINS, "--"] + [r["id"] for r in remove], check=True)
+    # its installer's records go too (archived beside it), so installing it
+    # again with its own installer starts fresh instead of being refused
+    if records:
+        subprocess.run(["tar", "czf", archive[:-len(".tar.gz")] + ".records.tar.gz", "-C", STATE_HOME, "--"]
+                       + [os.path.basename(d) for d in records], check=True)
+        for d in records:
+            shutil.rmtree(d)
     for r in remove:
         try:   # the shell may be busy or gone: removing the folder is what counts
             subprocess.run(["omarchy-shell", "shell", "setPluginEnabled", r["id"], "false"],
@@ -3151,6 +3190,54 @@ def uninstall_shell(sid, yes):
         pass
     plan.update(done=True, archive=archive)
     return plan
+
+
+def uninstalled_shells():
+    """The shells uninstall-shell archived, newest first."""
+    out = []
+    for a in sorted(glob.glob(os.path.join(UNINSTALLED, "*.tar.gz")), reverse=True):
+        name = os.path.basename(a)
+        if name.endswith(".records.tar.gz"):
+            continue
+        m = re.match(r"(.+)-(\d{8}-\d{6})\.tar\.gz$", name)
+        if not m:
+            continue
+        rec = a[:-len(".tar.gz")] + ".records.tar.gz"
+        out.append({"archive": name, "shell": m.group(1), "at": m.group(2),
+                    "installed": os.path.isdir(os.path.join(USER_PLUGINS, m.group(1))),
+                    "records": os.path.exists(rec)})
+    return out
+
+
+def restore_shell(name, yes):
+    """Unpack an uninstalled shell back: its plugins (never over ones that
+    are there now) and its installer's records."""
+    a = os.path.normpath(os.path.join(UNINSTALLED, name))
+    if os.path.commonpath([a, UNINSTALLED]) != UNINSTALLED or not a.endswith(".tar.gz") \
+            or a.endswith(".records.tar.gz") or not os.path.isfile(a):
+        raise Fail(f"no uninstalled shell '{name}' (see shell-swapper uninstalled)")
+    members = subprocess.run(["tar", "tzf", a], capture_output=True, text=True, check=True).stdout.split("\n")
+    tops = sorted({m.split("/")[0] for m in members if m and not m.startswith(("/", ".."))})
+    present = [t for t in tops if os.path.exists(os.path.join(USER_PLUGINS, t))]
+    rec = a[:-len(".tar.gz")] + ".records.tar.gz"
+    plan = {"action": "restore " + name, "restore": [t for t in tops if t not in present], "present": present,
+            "records": os.path.exists(rec)}
+    if not plan["restore"]:
+        raise Fail("all of its plugins are installed again already")
+    if not yes:
+        raise NeedsYes(plan)
+    subprocess.run(["tar", "xzf", a, "-C", USER_PLUGINS, "--"] + plan["restore"], check=True)
+    if os.path.exists(rec):
+        rtops = sorted({m.split("/")[0] for m in subprocess.run(["tar", "tzf", rec], capture_output=True, text=True,
+                                                                  check=True).stdout.split("\n") if m})
+        rtops = [t for t in rtops if not os.path.exists(os.path.join(STATE_HOME, t))]
+        if rtops:
+            subprocess.run(["tar", "xzf", rec, "-C", STATE_HOME, "--"] + rtops, check=True)
+    try:
+        subprocess.run(["omarchy-shell", "shell", "rescanPlugins"], capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return dict(plan, done=True)
 
 
 # What `install.sh --uninstall` leaves in bindings.lua, so a later install can

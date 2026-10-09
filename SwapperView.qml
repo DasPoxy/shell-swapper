@@ -77,11 +77,21 @@ FocusScope {
       out.push({ text: "Removes " + p.remove.length + " plugin" + (p.remove.length === 1 ? "" : "s") + " from ~/.config/omarchy/plugins:" })
       p.remove.forEach(function(r) { out.push({ text: "−  " + r.id, tone: "remove" }) })
       ;(p.keep || []).forEach(function(k) { out.push({ text: "kept: " + k.id + "  (" + k.why + ")", tone: "dim" }) })
-      out.push({ text: "They're archived first: " + short(String(p.archive).replace("<time>", "…")) + " - unpack it back into the plugins folder to restore them.", tone: "dim" })
+      ;(p.records || []).forEach(function(r) {
+        out.push({ text: "−  " + short(r) + "  (its installer's own records: cleared too, so installing it again starts fresh)", tone: "remove" })
+      })
+      out.push({ text: "Everything is archived first (" + short(String(p.archive).replace("<time>", "…")) + "): Settings › Restore puts it back.", tone: "dim" })
       if ((p.loadoutsKept || []).length)
         out.push({ text: "Your loadout" + (p.loadoutsKept.length === 1 ? "" : "s") + " for it (" + p.loadoutsKept.join(", ") + ") stay" + (p.loadoutsKept.length === 1 ? "s" : "") + ": delete " + (p.loadoutsKept.length === 1 ? "it" : "them") + " with d if you don't want " + (p.loadoutsKept.length === 1 ? "it" : "them") + ".", tone: "dim" })
     }
     // installing a plugin (a lock screen picked in the settings)
+    // restoring an uninstalled shell (settings)
+    if (p.restore) {
+      out.push({ text: "Puts these back into ~/.config/omarchy/plugins:" })
+      p.restore.forEach(function(r) { out.push({ text: "+  " + r, tone: "add" }) })
+      ;(p.present || []).forEach(function(r) { out.push({ text: "already there, left as it is: " + r, tone: "dim" }) })
+      if (p.records) out.push({ text: "and its installer's records, unless it has new ones now.", tone: "dim" })
+    }
     if (p.url) {
       out.push({ text: "Installs it from " + p.url + ", the way Omarchy adds any plugin:" })
       out.push({ text: "omarchy plugin add " + p.url + " --enable", tone: "code" })
@@ -224,8 +234,27 @@ FocusScope {
       Quickshell.execDetached(["xdg-open", (Quickshell.env("HOME") || "") + "/.local/state/shell-swapper/backups"])
     } })
     buttons.push({ label: "Uninstall a shell…", hint: "u", key: Qt.Key_U, act: function() { closeAsk(); askUninstall() } })
+    buttons.push({ label: "Restore an uninstalled shell…", hint: "r", key: Qt.Key_R, act: function() { closeAsk(); uninstalledProc.running = true } })
     buttons.push({ label: "Close", hint: "Esc", act: function() { closeAsk() } })
     ask = { title: "Settings", lines: lines, buttons: buttons }
+  }
+  // settings > restore an uninstalled shell: which archive
+  function askRestore(list) {
+    var lines = [{ text: "Shells you've uninstalled here, newest first. Restoring unpacks one back - its plugins, and its installer's records - and never over plugins installed since." }]
+    var avail = list.filter(function(x) { return !x.installed })
+    if (!list.length) lines.push({ text: "Nothing uninstalled yet.", tone: "dim" })
+    list.filter(function(x) { return x.installed }).forEach(function(x) {
+      lines.push({ text: suiteName(x.shell) + " (" + x.at + ") is installed again: nothing to restore.", tone: "dim" })
+    })
+    var buttons = avail.slice(0, 9).map(function(x, i) {
+      var when = x.at.slice(0, 4) + "-" + x.at.slice(4, 6) + "-" + x.at.slice(6, 8) + " " + x.at.slice(9, 11) + ":" + x.at.slice(11, 13)
+      return { label: x.shell + "  ·  " + when, hint: String(i + 1), key: Qt.Key_1 + i, act: function() {
+        closeAsk()
+        planRun(["restore-shell", x.archive], function(ok) { if (ok) say(x.shell + " restored: it's in the list again.") })
+      } }
+    })
+    buttons.push({ label: "Back", hint: "Esc", act: function() { closeAsk(); openSettings() } })
+    ask = { title: "Restore an uninstalled shell", lines: lines, buttons: buttons }
   }
   // settings > uninstall a shell: which one (not Omarchy's own, not the one you're in)
   function askUninstall() {
@@ -663,6 +692,12 @@ FocusScope {
                                                    + ((r.roots || []).length > 2 ? " and " + ((r.roots || []).length - 2) + " more" : "")
         if (r.text) sw.importText = (sw.importText.trim() ? sw.importText.trim() + "\n" : "") + r.text
     }
+  }
+  Cli {
+    id: uninstalledProc
+    command: ["python3", sw.script, "uninstalled"]
+    onJson: r => sw.askRestore(r.shells || [])
+    onFailed: m => sw.say(m, true)
   }
   Cli {
     id: locksProc

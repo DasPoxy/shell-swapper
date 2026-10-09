@@ -125,7 +125,7 @@ does it without asking; or later, `shell-swapper keys reinstate --yes`).
 | s | save the current shell as a new loadout (or update one by its name) |
 | r | rename the loadout |
 | d, d | delete it (to `~/.local/state/shell-swapper/trash/`); keys you moved into it go back into `bindings.lua` |
-| , (or the ⚙ settings button, top right) | settings: the lock screen for every shell, the backups folder, uninstalling a shell |
+| , (or the ⚙ settings button, top right) | settings: the lock screen for every shell, the backups folder, uninstalling and restoring a shell |
 | Esc | close |
 
 The right side shows the loadout's bar: a **picture** of it (in three
@@ -162,9 +162,13 @@ bar and the plugins that come with it (the ones sharing its id's prefix:
 you're in aren't offered, and anything the shell you're in or another
 shell's loadout still uses is kept (say, a Slime widget on another shell's
 bar). The removed plugins are archived first, in `backups/uninstalled/`
-(unpack one back into `~/.config/omarchy/plugins` to restore it); your
-loadouts for that shell are kept until you delete them. From the command
-line: `shell-swapper uninstall-shell SUITE [--yes]`.
+(**r** in the settings restores one); your loadouts for that shell are kept
+until you delete them. A shell whose own installer keeps records of what it
+installed (Shibumi's `~/.local/state/shibumi`) has those archived and cleared
+too - left behind, they still say "installed" and its installer refuses to
+install it again. From the command line: `shell-swapper uninstall-shell
+SUITE [--yes]`, `shell-swapper uninstalled`, `shell-swapper restore-shell
+ARCHIVE [--yes]`.
 
 ## Widgets stay on their own shell's bar
 

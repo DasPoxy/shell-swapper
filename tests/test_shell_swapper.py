@@ -322,3 +322,36 @@ class AuditFixes(unittest.TestCase):
             ss.uninstall_shell("other.bar", False)
         self.assertEqual([r["id"] for r in c.exception.plan["remove"]], ["other.bar"])
         self.assertTrue(os.path.isdir(os.path.join(ss.USER_PLUGINS, "other.bar")))
+
+    def test_uninstall_and_restore_round_trip(self):
+        # a stub omarchy-shell, so nothing real is told about it
+        stub = os.path.join(HOME, "stubbin")
+        os.makedirs(stub, exist_ok=True)
+        with open(os.path.join(stub, "omarchy-shell"), "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(stub, "omarchy-shell"), 0o755)
+        os.environ["PATH"] = stub + os.pathsep + os.environ["PATH"]
+        plugin("zztest.bar", ["bar"])
+        plugin("zztest.extra", ["service"])
+        rec = os.path.join(ss.STATE_HOME, "zztest")
+        os.makedirs(rec, exist_ok=True)
+        with open(os.path.join(rec, "install.json"), "w") as f:
+            f.write("{}")
+        with open(ss.SHELL_JSON, "w") as f:
+            json.dump({"bar": {"id": "acme.bar"}, "plugins": [], "disabledPlugins": []}, f)
+        r = ss.uninstall_shell("zztest.bar", True)
+        self.assertEqual(sorted(x["id"] for x in r["remove"]), ["zztest.bar", "zztest.extra"])
+        self.assertEqual(r["records"], [rec])
+        self.assertFalse(os.path.exists(os.path.join(ss.USER_PLUGINS, "zztest.bar")))
+        self.assertFalse(os.path.exists(rec))
+        archived = [x for x in ss.uninstalled_shells() if x["shell"] == "zztest.bar"]
+        self.assertTrue(archived and archived[0]["records"])
+        with self.assertRaises(ss.NeedsYes):
+            ss.restore_shell(archived[0]["archive"], False)
+        ss.restore_shell(archived[0]["archive"], True)
+        self.assertTrue(os.path.isfile(os.path.join(ss.USER_PLUGINS, "zztest.extra", "manifest.json")))
+        self.assertTrue(os.path.isfile(os.path.join(rec, "install.json")))
+        with self.assertRaises(ss.Fail):               # all back: nothing to restore
+            ss.restore_shell(archived[0]["archive"], True)
+        with self.assertRaises(ss.Fail):               # no escaping the archive folder
+            ss.restore_shell("../../etc.tar.gz", True)
