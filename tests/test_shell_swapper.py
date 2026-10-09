@@ -273,3 +273,52 @@ class Delete(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuditFixes(unittest.TestCase):
+    """2026-10-09 audit: Lua quoting, symlinked config files, uninstalling a shell."""
+
+    TRICKY = ['plain', 'echo "hi"', "toggle x '{\"a\":1}'", 'echo "x" [y]', 'a]]b', 'line1\nline2',
+              'x]]\ny', '\nlead', 'tab\there', 'back\\slash', 'bell\x07', 'é ünï', '']
+
+    def test_lua_str_round_trips(self):
+        for s in self.TRICKY:
+            self.assertEqual(ss.lua_text(ss.lua_str(s)), s, repr(s))
+
+    def test_lua_str_is_valid_lua(self):
+        import shutil
+        import subprocess
+        lua = shutil.which("lua") or shutil.which("luajit")
+        if not lua:
+            self.skipTest("no lua interpreter")
+        for s in self.TRICKY:
+            r = subprocess.run([lua, "-e", "io.write(" + ss.lua_str(s) + ")"], capture_output=True)
+            self.assertEqual((r.returncode, r.stdout.decode()), (0, s), repr(s))
+
+    def test_write_text_keeps_symlinks_and_mode(self):
+        real = os.path.join(HOME, "dotfiles", "bindings.lua")
+        os.makedirs(os.path.dirname(real), exist_ok=True)
+        with open(real, "w") as f:
+            f.write("old\n")
+        os.chmod(real, 0o600)
+        link = os.path.join(HOME, "linked-bindings.lua")
+        os.symlink(real, link)
+        ss.write_text(link, "new\n")
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(open(real).read(), "new\n")
+        self.assertEqual(os.stat(real).st_mode & 0o777, 0o600)
+
+    def test_uninstall_shell_guards(self):
+        # Omarchy's own can't go; an unknown id is refused; the plan comes first
+        with self.assertRaises(ss.Fail):
+            ss.uninstall_shell("omarchy.bar", False)
+        with self.assertRaises(ss.Fail):
+            ss.uninstall_shell("nope.bar", False)
+        with open(ss.SHELL_JSON, "w") as f:
+            json.dump({"bar": {"id": "acme.bar"}, "plugins": [], "disabledPlugins": []}, f)
+        with self.assertRaises(ss.Fail):               # the shell you're in
+            ss.uninstall_shell("acme.bar", False)
+        with self.assertRaises(ss.NeedsYes) as c:     # another shell: a plan, nothing removed
+            ss.uninstall_shell("other.bar", False)
+        self.assertEqual([r["id"] for r in c.exception.plan["remove"]], ["other.bar"])
+        self.assertTrue(os.path.isdir(os.path.join(ss.USER_PLUGINS, "other.bar")))

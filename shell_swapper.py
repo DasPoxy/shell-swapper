@@ -795,10 +795,18 @@ def read_text(path):
 
 
 def write_text(path, text):
+    """Atomic: a temp file beside it, then a rename. A file that's a symlink
+    (dotfiles kept in a repo, stow...) is written where the link points,
+    so the link stays; and it keeps the permissions it had."""
+    path = os.path.realpath(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    except OSError:
+        pass                                          # a new file: the usual permissions
     os.replace(tmp, path)
 
 
@@ -1482,10 +1490,19 @@ def actions_for(lid_or_suite, show_all=False):
 
 
 def lua_text(lit):
-    """The text of one Lua string literal."""
+    """The text of one Lua string literal (escapes decoded, as Lua does)."""
     if lit.startswith("[["):
-        return lit[2:-2]
-    return re.sub(r"\\(.)", r"\1", lit[1:-1])
+        body = lit[2:-2]
+        return body[1:] if body.startswith("\n") else body     # Lua drops a first newline
+    simple = {"n": "\n", "r": "\r", "t": "\t", "a": "\a", "b": "\b", "f": "\f", "v": "\v",
+              "\\": "\\", '"': '"', "'": "'", "\n": "\n"}
+
+    def esc(m):
+        e = m.group(1)
+        if e.isdigit():
+            return chr(int(e))
+        return simple.get(e, e)
+    return re.sub(r"\\(\d{1,3}|.)", esc, lit[1:-1], flags=re.S)
 
 
 def bind_command(lua):
@@ -1519,11 +1536,34 @@ def plain_bind(stmt):
 
 
 def lua_str(s):
-    if '"' not in s and "\\" not in s and "\n" not in s:
+    """A Lua string literal for s, that reads back as exactly s. Plain text
+    in quotes; text with quotes or backslashes as a [[long string]] (easier
+    to read: JSON arguments stay as they are) when that's safe - a long
+    string can't hold "]]", end in "]" or start with a newline; anything
+    else, or anything with control characters, quoted with escapes."""
+    s = str(s)
+    controls = any(ord(c) < 32 or ord(c) == 127 for c in s)
+    if not controls and '"' not in s and "\\" not in s:
         return '"' + s + '"'
-    if "]]" not in s:
+    if not controls and "]]" not in s and not s.endswith("]"):
         return "[[" + s + "]]"
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    out = []
+    for c in s:
+        if c == "\\":
+            out.append("\\\\")
+        elif c == '"':
+            out.append('\\"')
+        elif c == "\n":
+            out.append("\\n")
+        elif c == "\r":
+            out.append("\\r")
+        elif c == "\t":
+            out.append("\\t")
+        elif ord(c) < 32 or ord(c) == 127:
+            out.append("\\%03d" % ord(c))
+        else:
+            out.append(c)
+    return '"' + "".join(out) + '"'
 
 
 def bind_lua(keys, desc, command):
@@ -3093,16 +3133,22 @@ def uninstall_shell(sid, yes):
     os.makedirs(UNINSTALLED, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     archive = os.path.join(UNINSTALLED, f"{sid}-{stamp}.tar.gz")
-    subprocess.run(["tar", "czf", archive, "-C", USER_PLUGINS] + [r["id"] for r in remove], check=True)
+    subprocess.run(["tar", "czf", archive, "-C", USER_PLUGINS, "--"] + [r["id"] for r in remove], check=True)
     for r in remove:
-        subprocess.run(["omarchy-shell", "shell", "setPluginEnabled", r["id"], "false"],
-                       capture_output=True, timeout=5)
+        try:   # the shell may be busy or gone: removing the folder is what counts
+            subprocess.run(["omarchy-shell", "shell", "setPluginEnabled", r["id"], "false"],
+                           capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
         path = os.path.join(USER_PLUGINS, r["id"])
         if os.path.islink(path):
             os.unlink(path)
         else:
             shutil.rmtree(path)
-    subprocess.run(["omarchy-shell", "shell", "rescanPlugins"], capture_output=True, timeout=5)
+    try:
+        subprocess.run(["omarchy-shell", "shell", "rescanPlugins"], capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
     plan.update(done=True, archive=archive)
     return plan
 
