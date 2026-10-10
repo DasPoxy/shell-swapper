@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 HOME = tempfile.mkdtemp(prefix="shell-swapper-test-")
+os.environ.pop("XDG_STATE_HOME", None)   # else installer records are looked for in the real one
 OMARCHY = os.path.join(HOME, "omarchy")
 os.environ.update({
     "HOME": HOME, "OMARCHY_PATH": OMARCHY,
@@ -487,3 +488,57 @@ class SwapLifecycle(unittest.TestCase):
         with open(os.path.join(d, "install.json"), "w") as h:
             h.write("{}")
         self.assertEqual(ss.installer_records("qqshell.bar"), [d])
+
+
+class PrivateCopies(unittest.TestCase):
+    """Copies of a 0600 shell.json (originals, swap backups, last-good) stay
+    0600 under 0700 folders, whatever the umask; older 0644 copies get fixed."""
+    START = {"bar": {"id": "acme.bar"}, "plugins": [], "disabledPlugins": []}
+
+    def setUp(self):
+        ss._MANIFESTS = None
+        self.mask = os.umask(0o022)
+        for f in (ss.PENDING, ss.LAST_GOOD, os.path.join(ss.ORIGINALS, "shell.json")):
+            if os.path.exists(f):
+                os.remove(f)
+        ss.write_json(ss.SHELL_JSON, self.START)
+        os.chmod(ss.SHELL_JSON, 0o600)
+        ss.save_loadout("acme", dict(ACME))
+        ss.save_loadout("other", dict(OTHER))
+        ss.set_status(active="acme")
+
+    def tearDown(self):
+        os.umask(self.mask)
+
+    def mode(self, path):
+        return os.stat(path).st_mode & 0o777
+
+    def test_copies_are_private_from_creation(self):
+        r = ss.apply("other", confirm=False, keys="keep")
+        self.assertEqual(self.mode(ss.SHELL_JSON), 0o600)
+        for f in (os.path.join(ss.ORIGINALS, "shell.json"), r["backup"], ss.LAST_GOOD):
+            self.assertEqual(self.mode(f), 0o600, f)
+        d = os.path.dirname(r["backup"])
+        while True:
+            self.assertEqual(self.mode(d), 0o700, d)
+            if d == ss.STATE:
+                break
+            d = os.path.dirname(d)
+
+    def test_old_copies_are_repaired(self):
+        old = os.path.join(ss.SWAP_BACKUPS, "20200101-000000-old")
+        os.makedirs(old, exist_ok=True)
+        with open(os.path.join(old, "shell.json"), "w") as f:
+            f.write("{}\n")
+        os.chmod(os.path.join(old, "shell.json"), 0o644)
+        os.chmod(old, 0o755)
+        os.chmod(ss.STATE, 0o755)
+        ss.run(["backups"])
+        self.assertEqual(self.mode(ss.STATE), 0o700)
+        self.assertEqual(self.mode(old), 0o700)
+        self.assertEqual(self.mode(os.path.join(old, "shell.json")), 0o600)
+
+    def test_new_files_elsewhere_keep_the_usual_mode(self):
+        path = os.path.join(HOME, "elsewhere", "new.lua")
+        ss.write_text(path, "x\n")
+        self.assertEqual(self.mode(path), 0o644)

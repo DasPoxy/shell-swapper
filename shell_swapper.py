@@ -96,6 +96,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -207,6 +208,59 @@ class Fail(Exception):
 
 # ---- files ----------------------------------------------------------------
 
+def private_roots():
+    return (STATE, CONF_DIR)
+
+
+def is_private(path):
+    """Under Shell-Swapper's own folders: copies of your shell.json, keys and
+    loadouts, kept to you alone (0700 folders, 0600 files)."""
+    path = os.path.realpath(path)
+    return any(path == r or path.startswith(r + os.sep) for r in map(os.path.realpath, private_roots()))
+
+
+def makedirs_private(path):
+    """os.makedirs, with every folder it makes (or finds) under our own ones 0700."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    path = os.path.realpath(path)
+    for root in map(os.path.realpath, private_roots()):
+        if path == root or path.startswith(root + os.sep):
+            d = path
+            while True:
+                try:
+                    os.chmod(d, 0o700)
+                except OSError:
+                    pass
+                if d == root:
+                    break
+                d = os.path.dirname(d)
+
+
+def write_private(path, data, exclusive=False):
+    """Bytes to a file only you can read, from the moment it exists."""
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(data)
+
+
+def secure_private():
+    """Older versions wrote these with your umask (0644 under 0755 folders):
+    put every folder and file of ours back to you alone."""
+    for root in private_roots():
+        if not os.path.isdir(root):
+            continue
+        for d, dirs, files in os.walk(root):
+            for path, mode in [(d, 0o700)] + [(os.path.join(d, f), 0o600) for f in files]:
+                try:
+                    st = os.lstat(path)
+                    if not stat.S_ISLNK(st.st_mode) and st.st_mode & 0o777 != mode:
+                        os.chmod(path, mode)
+                except OSError:
+                    pass
+
+
 def read_json(path, default=None):
     try:
         with open(path, encoding="utf-8") as f:
@@ -222,8 +276,8 @@ def write_json(path, data):
 
 class Lock:
     def __enter__(self):
-        os.makedirs(STATE, exist_ok=True)
-        self.f = open(os.path.join(STATE, "lock"), "w")
+        makedirs_private(STATE)
+        self.f = os.fdopen(os.open(os.path.join(STATE, "lock"), os.O_WRONLY | os.O_CREAT, 0o600), "w")
         fcntl.flock(self.f, fcntl.LOCK_EX)
         return self
 
@@ -522,7 +576,7 @@ def save_loadout(lid, data):
     if isinstance(old, dict) and old != data:
         # the loadout as it was, before this change
         d = os.path.join(LOADOUT_BACKUPS, lid)
-        os.makedirs(d, exist_ok=True)
+        makedirs_private(d)
         write_json(os.path.join(d, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4] + ".json"), old)
         for f in sorted(glob.glob(os.path.join(d, "*.json")))[:-KEEP_LOADOUT_BACKUPS]:
             os.remove(f)
@@ -534,18 +588,16 @@ def keep_original(path):
     it was goes to backups/original/, and stays there."""
     if not os.path.isfile(path):
         return
-    os.makedirs(ORIGINALS, exist_ok=True)
+    makedirs_private(ORIGINALS)
     dest = os.path.join(ORIGINALS, os.path.basename(path))
     if not os.path.exists(dest):
         with open(path, "rb") as f:
             data = f.read()
-        with open(dest, "wb") as f:
-            f.write(data)
+        write_private(dest, data, exclusive=True)
     note = os.path.join(ORIGINALS, "README.txt")
     if not os.path.exists(note):
-        with open(note, "w") as f:
-            f.write("Your files as they were before Shell-Swapper first changed them.\n"
-                    "Shell-Swapper never changes or deletes these.\n")
+        write_private(note, b"Your files as they were before Shell-Swapper first changed them.\n"
+                            b"Shell-Swapper never changes or deletes these.\n", exclusive=True)
 
 
 def migrate_backups():
@@ -553,11 +605,11 @@ def migrate_backups():
     keybind-backups/ move into backups/swaps and backups/keys."""
     for f in glob.glob(os.path.join(BACKUPS, "*.json")):
         d = os.path.join(SWAP_BACKUPS, os.path.basename(f)[:-5])
-        os.makedirs(d, exist_ok=True)
+        makedirs_private(d)
         os.replace(f, os.path.join(d, "shell.json"))
     old = os.path.join(STATE, "keybind-backups")
     if os.path.isdir(old):
-        os.makedirs(KEY_BACKUPS, exist_ok=True)
+        makedirs_private(KEY_BACKUPS)
         for f in glob.glob(os.path.join(old, "*")):
             os.replace(f, os.path.join(KEY_BACKUPS, os.path.basename(f)))
         os.rmdir(old)
@@ -803,16 +855,24 @@ def read_text(path):
 def write_text(path, text):
     """Atomic: a temp file beside it, then a rename. A file that's a symlink
     (dotfiles kept in a repo, stow...) is written where the link points,
-    so the link stays; and it keeps the permissions it had."""
+    so the link stays; and it keeps the permissions it had. The temp file
+    is 0600 from the start, and anything in our own folders stays 0600 (it
+    holds copies of your config)."""
     path = os.path.realpath(path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    private = is_private(path)
+    if private:
+        makedirs_private(os.path.dirname(path))
+    else:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    try:
-        os.chmod(tmp, os.stat(path).st_mode & 0o7777)
-    except OSError:
-        pass                                          # a new file: the usual permissions
+    write_private(tmp, text.encode("utf-8"))
+    if not private:
+        try:
+            os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+        except OSError:                               # a new file: the usual permissions
+            mask = os.umask(0)
+            os.umask(mask)
+            os.chmod(tmp, 0o666 & ~mask)
     os.replace(tmp, path)
 
 
@@ -824,7 +884,7 @@ def key_backup(path):
         return ""
     if path != KEYS_FILE:
         keep_original(path)
-    os.makedirs(KEY_BACKUPS, exist_ok=True)
+    makedirs_private(KEY_BACKUPS)
     dest = os.path.join(KEY_BACKUPS, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
                         + "-" + os.path.basename(path))
     write_text(dest, text)
@@ -1265,7 +1325,7 @@ def delete_loadout(lid, yes):
             write_text(BINDINGS, organize_text("\n".join(lines), {k: v for k, v in loadout_names().items() if k != lid}))
             hypr_reload()
         trash = os.path.join(STATE, "trash")
-        os.makedirs(trash, exist_ok=True)
+        makedirs_private(trash)
         os.replace(loadout_path(lid), os.path.join(trash, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + lid + ".json"))
         return dict(plan, deleted=lid)
 
@@ -2527,13 +2587,14 @@ def take_preview(lid=None, if_missing=False):
         if not reg:
             raise Fail("couldn't find the bar on screen")
         x, y, w, h, pos = reg
-        os.makedirs(PREVIEWS, exist_ok=True)
+        makedirs_private(PREVIEWS)
         path = os.path.join(PREVIEWS, lid + ".png")
         tmp = path + ".tmp.png"
         cmd = os.environ.get("SHELL_SWAPPER_GRIM", "grim")
         r = subprocess.run(shlex.split(cmd) + ["-g", f"{x},{y} {w}x{h}", tmp], capture_output=True, text=True, timeout=10)
         if r.returncode != 0 or not os.path.exists(tmp):
             raise Fail("the screenshot didn't work: " + (r.stderr.strip() or "grim failed"))
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
         # the picture's own size (at a scaled display it's bigger than the bar's)
         pw, ph = png_size(path) or (w, h)
@@ -2615,7 +2676,7 @@ def backup(cfg):
     the keys file and your bindings.lua. Returns the shell.json copy."""
     keep_original(SHELL_JSON)
     d = os.path.join(SWAP_BACKUPS, dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])
-    os.makedirs(d, exist_ok=True)
+    makedirs_private(d)
     path = os.path.join(d, "shell.json")
     write_json(path, cfg)
     for f in (KEYS_FILE, BINDINGS):
@@ -2946,6 +3007,7 @@ def run(argv):
         print(__doc__.strip())
         return None
     cmd, rest = argv[0], argv[1:]
+    secure_private()
     if os.path.isdir(STATE):
         with Lock():
             migrate_backups()
@@ -3224,15 +3286,17 @@ def uninstall_shell(sid, yes, everything=False):
             "archive": os.path.join(UNINSTALLED, f"{sid}-<time>.tar.gz")}
     if not yes:
         raise NeedsYes(plan)
-    os.makedirs(UNINSTALLED, exist_ok=True)
+    makedirs_private(UNINSTALLED)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     archive = os.path.join(UNINSTALLED, f"{sid}-{stamp}.tar.gz")
     subprocess.run(["tar", "czf", archive, "-C", USER_PLUGINS, "--"] + [r["id"] for r in remove], check=True)
+    os.chmod(archive, 0o600)
     # its installer's records go too (archived beside it), so installing it
     # again with its own installer starts fresh instead of being refused
     if records:
         subprocess.run(["tar", "czf", archive[:-len(".tar.gz")] + ".records.tar.gz", "-C", STATE_HOME, "--"]
                        + [os.path.basename(d) for d in records], check=True)
+        os.chmod(archive[:-len(".tar.gz")] + ".records.tar.gz", 0o600)
         for d in records:
             shutil.rmtree(d)
     for r in remove:
