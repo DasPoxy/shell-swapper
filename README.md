@@ -179,7 +179,7 @@ shell that brings its own lock screen uses it while it's on screen.
 
 ### Backups and uninstalling a shell (settings)
 
-<img src="screenshots/uninstall.jpg" width="420" align="right" alt="Uninstalling a shell: exactly what goes, archived first">
+<img src="screenshots/removing.jpg" width="420" align="right" alt="Uninstalling a shell: exactly what goes, archived first">
 
 
 **b** opens the backups folder (`~/.local/state/shell-swapper/backups`):
